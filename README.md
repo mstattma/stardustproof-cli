@@ -120,3 +120,16 @@ export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN=<token>
 export STARDUSTPROOF_TEST_BIN_DIR=$PWD/bin
 PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -q
 ```
+
+For a one-command local run, use:
+
+```bash
+export STARDUSTPROOF_TEST_ORG_UUID=<org-uuid>
+export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN=<token>
+./scripts/run_smoke.sh
+```
+
+Defaults in the helper script:
+
+- `STARDUSTPROOF_TEST_KEYSTORE_URL=http://localhost:2001`
+- `STARDUSTPROOF_TEST_BIN_DIR=$PWD/bin`
