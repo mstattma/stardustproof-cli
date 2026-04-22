@@ -99,6 +99,16 @@ Current video support uses the same rawvideo Stardust embed path and then signs
 the final output with the simplified manifest workflow. Thumbnail generation is
 automatically skipped for non-image media.
 
+The repo includes a local 1080p Creative Commons video fixture for smoke tests:
+
+- `tests/fixtures/big-buck-bunny-trailer-1080p.mov`
+- Source: Blender Foundation `Big Buck Bunny`
+- License: CC BY 3.0
+
+The image smoke fixture is also local:
+
+- `tests/fixtures/sample-photo.jpg`
+
 ## Integration Smoke Test
 
 An opt-in smoke test exercises the real keystore + signer path:
@@ -107,6 +117,6 @@ An opt-in smoke test exercises the real keystore + signer path:
 export STARDUSTPROOF_TEST_KEYSTORE_URL=http://localhost:2001
 export STARDUSTPROOF_TEST_ORG_UUID=<org-uuid>
 export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN=<token>
-export STARDUSTPROOF_TEST_BIN_DIR=/path/to/stardust/bin
+export STARDUSTPROOF_TEST_BIN_DIR=$PWD/bin
 PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -q
 ```
