@@ -7,8 +7,26 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$REPO_ROOT"
 
+if [[ -f "$REPO_ROOT/.env.smoke.example" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.env.smoke.example"
+    set +a
+fi
+
+if [[ -f "$REPO_ROOT/.env.smoke.local" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.env.smoke.local"
+    set +a
+fi
+
 : "${STARDUSTPROOF_TEST_KEYSTORE_URL:=http://localhost:2001}"
-: "${STARDUSTPROOF_TEST_BIN_DIR:=$REPO_ROOT/bin}"
+: "${STARDUSTPROOF_TEST_BIN_DIR:=./bin}"
+
+if [[ "$STARDUSTPROOF_TEST_BIN_DIR" != /* ]]; then
+    STARDUSTPROOF_TEST_BIN_DIR="$REPO_ROOT/$STARDUSTPROOF_TEST_BIN_DIR"
+fi
 
 if [[ -z "${STARDUSTPROOF_TEST_ORG_UUID:-}" ]]; then
     echo "STARDUSTPROOF_TEST_ORG_UUID is required" >&2
@@ -22,5 +40,7 @@ fi
 
 export STARDUSTPROOF_TEST_KEYSTORE_URL
 export STARDUSTPROOF_TEST_BIN_DIR
+export STARDUSTPROOF_TEST_ORG_UUID
+export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN
 
 PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -q
