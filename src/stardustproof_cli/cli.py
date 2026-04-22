@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from stardustproof_cli.config import StardustConfig, StardustPaths
@@ -100,15 +101,29 @@ def _make_org_sign_handler(keystore, access_token: str):
 def cmd_sign(args: argparse.Namespace) -> int:
     from stardustproof_c2pa_signer import KeystoreClient, generate_and_embed_manifest_simple
 
+    total_start = time.perf_counter()
+    print(f"[cli] Starting sign flow for: {args.input}", flush=True)
     payload = _validate_payload(args.wm_payload_hex, args.wm_bit_profile)
     config = _build_config(args)
+
+    step_start = time.perf_counter()
     missing = stardust.check_binaries(config.paths)
     if missing:
         raise RuntimeError("Missing required binaries:\n  - " + "\n  - ".join(missing))
+    print(f"[cli] Binary checks: {time.perf_counter() - step_start:.2f}s", flush=True)
 
+    step_start = time.perf_counter()
+    media = stardust.probe_media(args.input)
+    print(f"[cli] Media detected: {media.media_kind} {media.width}x{media.height}", flush=True)
+    media_probe_s = time.perf_counter() - step_start
+
+    step_start = time.perf_counter()
     stardust.embed(args.input, args.output, args.wm_payload_hex.lower(), config)
+    embed_s = time.perf_counter() - step_start
+    print(f"[cli] Watermark embed: {embed_s:.2f}s", flush=True)
 
     keystore = KeystoreClient(base_url=args.keystore_url, api_key=args.keystore_api_key)
+    step_start = time.perf_counter()
     manifest_bytes = generate_and_embed_manifest_simple(
         image_path=args.output,
         wm_id_bytes=payload,
@@ -122,18 +137,28 @@ def cmd_sign(args: argparse.Namespace) -> int:
     )
     if manifest_bytes is None:
         raise RuntimeError("Manifest generation failed")
+    manifest_sign_s = time.perf_counter() - step_start
+    print(f"[cli] Manifest sign/embed: {manifest_sign_s:.2f}s", flush=True)
 
+    step_start = time.perf_counter()
     manifest_path = DirectoryManifestStore(Path(args.manifest_store)).write_manifest(
         wm_id_hex=args.wm_payload_hex.lower(),
         manifest_bytes=manifest_bytes,
         overwrite=args.overwrite_manifest,
     )
-    media = stardust.probe_media(args.output)
+    manifest_store_s = time.perf_counter() - step_start
+    print(f"[cli] Manifest store write: {manifest_store_s:.2f}s", flush=True)
+
     print(f"Media type: {media.media_kind}")
     print(f"Watermarked image: {args.output}")
     print(f"Manifest store entry: {manifest_path}")
     print(f"WM ID: {args.wm_payload_hex.lower()}")
     print(f"Manifest size: {len(manifest_bytes)} bytes")
+    print(
+        f"[cli] Timing summary: probe={media_probe_s:.2f}s embed={embed_s:.2f}s "
+        f"sign={manifest_sign_s:.2f}s store={manifest_store_s:.2f}s total={time.perf_counter() - total_start:.2f}s",
+        flush=True,
+    )
     return 0
 
 

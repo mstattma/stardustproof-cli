@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +20,24 @@ class MediaInfo:
     media_kind: str
 
 
+def _is_verbose() -> bool:
+    return os.environ.get("STARDUSTPROOF_VERBOSE", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _log(message: str) -> None:
+    print(f"[stardust] {message}", flush=True)
+
+
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    verbose = kwargs.pop("verbose", _is_verbose())
+    if verbose:
+        _log(f"Running: {' '.join(cmd)}")
+        result = subprocess.run(cmd, text=True, **kwargs)
+    else:
+        result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
     if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {' '.join(cmd)}\nstderr: {result.stderr}")
+        stderr = getattr(result, "stderr", "")
+        raise RuntimeError(f"Command failed: {' '.join(cmd)}\nstderr: {stderr}")
     return result
 
 
@@ -78,16 +93,23 @@ def check_binaries(paths: StardustPaths) -> list[str]:
 
 def embed(image_path: str, output_path: str, wm_id_hex: str, config: StardustConfig) -> str:
     paths = config.paths
+    embed_start = time.perf_counter()
     media = probe_media(image_path)
     width = media.width
     height = media.height
     bit_profile = len(wm_id_hex) * 4
+    _log(f"Embedding watermark into {media.media_kind} {width}x{height}: {image_path}")
 
     with tempfile.TemporaryDirectory() as tmp:
         cover_yuv = os.path.join(tmp, "cover.yuv")
         embedded_yuv = os.path.join(tmp, "embedded.yuv")
 
+        step_start = time.perf_counter()
         _run(["ffmpeg", "-y", "-i", image_path, "-pix_fmt", "yuv420p", "-f", "rawvideo", cover_yuv])
+        ffmpeg_decode_s = time.perf_counter() - step_start
+        _log(f"ffmpeg decode to rawvideo: {ffmpeg_decode_s:.2f}s")
+
+        step_start = time.perf_counter()
         _run(
             [
                 str(paths.stardust_embed),
@@ -123,6 +145,8 @@ def embed(image_path: str, output_path: str, wm_id_hex: str, config: StardustCon
                 str(config.stardust_fec),
             ]
         )
+        stardust_embed_s = time.perf_counter() - step_start
+        _log(f"sffw-embed: {stardust_embed_s:.2f}s")
 
         if media.media_kind == "video":
             frame_rate = media.frame_rate or "30"
@@ -146,15 +170,25 @@ def embed(image_path: str, output_path: str, wm_id_hex: str, config: StardustCon
             ]
             if media.has_audio:
                 cmd.extend(["-map", "1:a:0", "-c:a", "copy"])
-            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", output_path])
+            cmd.extend(["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-shortest", output_path])
+            step_start = time.perf_counter()
             _run(cmd)
+            ffmpeg_encode_s = time.perf_counter() - step_start
+            _log(f"ffmpeg video encode: {ffmpeg_encode_s:.2f}s")
         else:
+            step_start = time.perf_counter()
             _run([
                 "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}", "-i", embedded_yuv,
                 "-frames:v", "1", output_path,
             ])
+            ffmpeg_encode_s = time.perf_counter() - step_start
+            _log(f"ffmpeg image encode: {ffmpeg_encode_s:.2f}s")
 
         base = os.path.splitext(output_path)[0]
-        shutil.copy2(cover_yuv, f"{base}.reference.yuv")
+        reference_path = f"{base}.reference.yuv"
+        step_start = time.perf_counter()
+        shutil.move(cover_yuv, reference_path)
         Path(f"{base}.stardust_meta").write_text(f"{width} {height}\n")
+        _log(f"reference sidecar move + metadata: {time.perf_counter() - step_start:.2f}s")
+    _log(f"Embed pipeline total: {time.perf_counter() - embed_start:.2f}s")
     return output_path

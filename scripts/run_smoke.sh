@@ -43,4 +43,9 @@ export STARDUSTPROOF_TEST_BIN_DIR
 export STARDUSTPROOF_TEST_ORG_UUID
 export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN
 
-PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -q
+echo "[smoke] Repo: $REPO_ROOT"
+echo "[smoke] Keystore URL: $STARDUSTPROOF_TEST_KEYSTORE_URL"
+echo "[smoke] Bin dir: $STARDUSTPROOF_TEST_BIN_DIR"
+echo "[smoke] Starting integration smoke run at $(date -Iseconds)"
+
+PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -s -vv

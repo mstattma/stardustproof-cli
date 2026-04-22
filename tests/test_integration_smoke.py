@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,7 @@ def _build_sign_args(
 
 @pytest.mark.integration
 def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
+    start = time.perf_counter()
     keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
 
     input_path = FIXTURES_DIR / "sample-photo.jpg"
@@ -80,15 +82,20 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
         wm_payload_hex=wm_payload_hex,
     )
 
+    print(f"[smoke] image fixture: {input_path}", flush=True)
+    print(f"[smoke] image output: {output_path}", flush=True)
+
     rc = cmd_sign(args)
 
     assert rc == 0
     assert output_path.exists()
     assert (manifest_store / f"{wm_payload_hex}.c2pa").exists()
+    print(f"[smoke] image smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
 @pytest.mark.integration
 def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
+    start = time.perf_counter()
     keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
 
     input_path = FIXTURES_DIR / "big-buck-bunny-trailer-1080p.mov"
@@ -106,8 +113,12 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
         wm_payload_hex=wm_payload_hex,
     )
 
+    print(f"[smoke] video fixture: {input_path}", flush=True)
+    print(f"[smoke] video output: {output_path}", flush=True)
+
     rc = cmd_sign(args)
 
     assert rc == 0
     assert output_path.exists()
     assert (manifest_store / f"{wm_payload_hex}.c2pa").exists()
+    print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
