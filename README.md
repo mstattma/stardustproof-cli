@@ -4,14 +4,18 @@ CLI for Stardust watermarking and simplified C2PA signing.
 
 ## Scope
 
-Current first version supports:
+Current version supports:
 
-- watermarking images with a caller-provided payload
-- watermarking video containers through the same rawvideo embed path
-- configurable watermark payload length
+- single-pipeline watermarking of images and video via a patched FFmpeg
+  with the castLabs `sffwembedsafe` filter
+- blind extraction as the only verification model (no reference sidecar
+  files are produced)
+- configurable watermark payload length (default 48 bits)
 - org-only signing via `org:{uuid}` through the keystore bearer flow
-- simplified C2PA manifest generation via `generate_and_embed_manifest_simple()`
-- writing detached manifests into a local directory store keyed by watermark id
+- simplified C2PA manifest generation via
+  `generate_and_embed_manifest_simple()`
+- detached manifests written into a local directory store keyed by
+  watermark id
 
 Out of scope for now:
 
@@ -20,108 +24,127 @@ Out of scope for now:
 - ledger integration
 - IPFS integration
 
+## Repo layout
+
+```
+bin/
+  stardust/            # Stardust tools (sffw-embed, extract, align)
+  ffmpeg/
+    bin/
+      ffmpeg           # patched static FFmpeg with sffwembedsafe filter
+      ffprobe          # static FFprobe from same build
+    VERSION.md         # build metadata
+```
+
+All binaries are committed directly in the repo as **x86_64 Linux**
+statically linked artifacts.  Other platforms are not supported out of the
+box; use `scripts/build_patched_ffmpeg.sh` to rebuild for your target.
+
 ## Installation
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-The CLI looks for Stardust binaries in this order:
+The CLI enforces a strict binary layout.  It looks for the `bin/` root in
+this order:
 
 1. `--bin-dir`
 2. `STARDUSTPROOF_BIN_DIR`
 3. `./bin/`
-4. `./stardust_prebuilt_x64_avx2/`
 
-Populate one of those directories with:
+All four binaries are required:
 
-- `bin/sffw-embed`
-- `bin/extract`
-- `bin/align`
+- `bin/stardust/sffw-embed`
+- `bin/stardust/extract`
+- `bin/ffmpeg/bin/ffmpeg`
+- `bin/ffmpeg/bin/ffprobe`
 
-Typical bootstrap options:
+There is no system `ffmpeg`/`ffprobe` fallback — the bundled patched
+builds are used exclusively.
 
-```bash
-# Option 1: copy prebuilt binaries into this repo
-mkdir -p bin
-cp /path/to/sffw-embed /path/to/extract /path/to/align bin/
-
-# Option 2: point at an external binary directory
-export STARDUSTPROOF_BIN_DIR=/path/to/stardust_prebuilt_x64_avx2
-```
-
-System tools required:
-
-- `ffmpeg`
-- `ffprobe`
-
-For image signing, install the signer dependencies as well:
+## Rebuilding FFmpeg (fallback)
 
 ```bash
-pip install -e ".[dev]"
+# Debian/Ubuntu prerequisites:
+sudo apt-get install -y build-essential nasm yasm pkg-config \
+    libx264-dev patch cmake curl
+
+# Point STARDUST_SRC at the stardust source tree, then:
+./scripts/build_patched_ffmpeg.sh
 ```
+
+The script builds a static `libsffwembedsafe.a` from the Stardust SAFE
+objects, fetches FFmpeg upstream sources, applies the filter patches, and
+produces `bin/ffmpeg/bin/ffmpeg` and `bin/ffmpeg/bin/ffprobe`.
 
 ## Usage
+
+### Image
 
 ```bash
 stardustproof sign \
   --input input.jpg \
   --output signed.png \
-  --wm-payload-hex 00112233445566778899aabbccddeeff001122 \
-  --wm-bit-profile 160 \
+  --wm-payload-hex 001122334455 \
+  --wm-bit-profile 48 \
   --manifest-store ./manifest-store \
   --org-uuid <org-uuid> \
   --keystore-url http://localhost:2001 \
   --signing-access-token <token>
 ```
 
-This will:
-
-1. watermark the input image with the provided payload
-2. embed a simplified C2PA manifest into the watermarked output image
-3. write the detached manifest to `./manifest-store/<wm-payload-hex>.c2pa`
-
-## Video Usage
+### Video
 
 ```bash
 stardustproof sign \
   --input clip.mp4 \
-  --output clip_signed.mp4 \
-  --wm-payload-hex 00112233445566778899aabbccddeeff001122 \
-  --wm-bit-profile 160 \
+  --output signed.mp4 \
+  --wm-payload-hex 001122334455 \
+  --wm-bit-profile 48 \
   --manifest-store ./manifest-store \
   --org-uuid <org-uuid> \
   --keystore-url http://localhost:2001 \
-  --signing-access-token <token>
+  --signing-access-token <token> \
+  --video-preset veryfast \
+  --video-crf 18
 ```
 
-Current video support uses the same rawvideo Stardust embed path and then signs
-the final output with the simplified manifest workflow. Thumbnail generation is
-automatically skipped for non-image media.
+The default video encode is `libx264 -preset veryfast -crf 18`.  Presets
+faster than `veryfast` (notably `ultrafast`) break blind extraction.
 
-The repo includes a local 1080p Creative Commons video fixture for smoke tests:
+### Notes
 
-- `tests/fixtures/big-buck-bunny-trailer-1080p.mov`
-- Source: Blender Foundation `Big Buck Bunny`
-- License: CC BY 3.0
+The embed pipeline runs as a single FFmpeg invocation:
 
-The image smoke fixture is also local:
+1. generate the Stardust `.pp` payload via `sffw-embed --payload-file`
+2. decode → `sffwembedsafe` filter → encode in one ffmpeg pass
+3. simplified C2PA manifest signing via `stardustproof-c2pa-signer`
+4. write detached manifest to `<manifest-store>/<wm-payload-hex>.c2pa`
 
-- `tests/fixtures/sample-photo.jpg`
+No reference YUV or metadata sidecars are produced.
+
+## Test fixtures
+
+- `tests/fixtures/sample-photo.jpg` — 1920x1080 natural photo
+- `tests/fixtures/big-buck-bunny-trailer-1080p.mov` — Blender Foundation
+  _Big Buck Bunny_ trailer (CC BY 3.0).
 
 ## Integration Smoke Test
 
-An opt-in smoke test exercises the real keystore + signer path:
+The integration smoke test exercises the real keystore + signer path and
+asserts that the embedded watermark is blind-extractable from the signed
+output:
 
 ```bash
 export STARDUSTPROOF_TEST_KEYSTORE_URL=http://localhost:2001
 export STARDUSTPROOF_TEST_ORG_UUID=<org-uuid>
 export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN=<token>
 export STARDUSTPROOF_TEST_BIN_DIR=$PWD/bin
-PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -q
+PYTHONPATH=src pytest tests/test_integration_smoke.py -m integration -s -vv
 ```
 
-For a one-command local run, use:
+For a one-command local run:
 
 ```bash
 # one-time setup

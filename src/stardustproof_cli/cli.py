@@ -17,9 +17,9 @@ def _parse_args() -> argparse.Namespace:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sign = sub.add_parser("sign", help="Watermark an image and write a detached manifest")
-    sign.add_argument("--input", required=True, help="Input image path")
-    sign.add_argument("--output", required=True, help="Output watermarked image path")
+    sign = sub.add_parser("sign", help="Watermark an image/video and write a detached manifest")
+    sign.add_argument("--input", required=True, help="Input image or video path")
+    sign.add_argument("--output", required=True, help="Output watermarked image/video path")
     sign.add_argument("--wm-payload-hex", required=True, help="Watermark payload as hex")
     sign.add_argument("--wm-bit-profile", type=int, default=None, help="Watermark bit length")
     sign.add_argument("--manifest-store", required=True, help="Directory for detached manifests")
@@ -31,7 +31,18 @@ def _parse_args() -> argparse.Namespace:
     sign.add_argument("--claim-generator-version", default="1.0", help="Claim generator version")
     sign.add_argument("--overwrite-manifest", action="store_true", help="Overwrite manifest store entry if it exists")
     sign.add_argument("--no-thumbnail", dest="thumbnail", action="store_false", default=True, help="Skip thumbnail generation")
-    sign.add_argument("--bin-dir", help="Directory containing sffw-embed/extract/align")
+    sign.add_argument("--bin-dir", help="Directory containing bundled Stardust + ffmpeg binaries")
+    sign.add_argument(
+        "--video-preset",
+        default="veryfast",
+        help="libx264 encode preset for video outputs (default: veryfast; 'ultrafast' is too aggressive for blind extraction)",
+    )
+    sign.add_argument(
+        "--video-crf",
+        type=int,
+        default=18,
+        help="libx264 CRF for video outputs (default: 18)",
+    )
     sign.add_argument("--strength", type=int, default=None)
     sign.add_argument("--sp-width", type=int, default=None)
     sign.add_argument("--sp-height", type=int, default=None)
@@ -109,16 +120,26 @@ def cmd_sign(args: argparse.Namespace) -> int:
     step_start = time.perf_counter()
     missing = stardust.check_binaries(config.paths)
     if missing:
-        raise RuntimeError("Missing required binaries:\n  - " + "\n  - ".join(missing))
+        raise RuntimeError(
+            "Missing required binaries (ensure bin/stardust/ and bin/ffmpeg/bin/ are present):\n"
+            + "\n".join(f"  - {m}" for m in missing)
+        )
     print(f"[cli] Binary checks: {time.perf_counter() - step_start:.2f}s", flush=True)
 
     step_start = time.perf_counter()
-    media = stardust.probe_media(args.input)
+    media = stardust.probe_media(args.input, config.paths)
     print(f"[cli] Media detected: {media.media_kind} {media.width}x{media.height}", flush=True)
     media_probe_s = time.perf_counter() - step_start
 
     step_start = time.perf_counter()
-    stardust.embed(args.input, args.output, args.wm_payload_hex.lower(), config)
+    stardust.embed(
+        args.input,
+        args.output,
+        args.wm_payload_hex.lower(),
+        config,
+        video_preset=args.video_preset,
+        video_crf=args.video_crf,
+    )
     embed_s = time.perf_counter() - step_start
     print(f"[cli] Watermark embed: {embed_s:.2f}s", flush=True)
 
@@ -150,7 +171,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
     print(f"[cli] Manifest store write: {manifest_store_s:.2f}s", flush=True)
 
     print(f"Media type: {media.media_kind}")
-    print(f"Watermarked image: {args.output}")
+    print(f"Watermarked output: {args.output}")
     print(f"Manifest store entry: {manifest_path}")
     print(f"WM ID: {args.wm_payload_hex.lower()}")
     print(f"Manifest size: {len(manifest_bytes)} bytes")

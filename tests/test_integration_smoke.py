@@ -8,9 +8,16 @@ from pathlib import Path
 import pytest
 
 from stardustproof_cli.cli import cmd_sign
+from stardustproof_cli import stardust
+from stardustproof_cli.config import StardustConfig, StardustPaths
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# 48-bit watermark payload. The Phase 0 analysis showed that 48 bits with
+# strength=4 survives both JPEG/MJPEG and libx264 veryfast/crf=18 for blind
+# extraction at 1080p, whereas longer payloads (>=144 bits) do not.
+SMOKE_WM_HEX = "001122334455"
 
 
 def _smoke_env() -> tuple[str, str, str, str]:
@@ -51,6 +58,8 @@ def _build_sign_args(
         overwrite_manifest=False,
         thumbnail=False,
         bin_dir=bin_dir,
+        video_preset="veryfast",
+        video_crf=18,
         strength=None,
         sp_width=None,
         sp_height=None,
@@ -62,6 +71,17 @@ def _build_sign_args(
     )
 
 
+def _assert_blind_extract(output_path: Path, wm_payload_hex: str, bin_dir: str) -> None:
+    config = StardustConfig(paths=StardustPaths(custom_bin_dir=Path(bin_dir).resolve()).resolve())
+    wm_bit_profile = len(bytes.fromhex(wm_payload_hex)) * 8
+    recovered = stardust.extract_blind(str(output_path), wm_bit_profile=wm_bit_profile, config=config)
+    assert recovered is not None, "blind extraction failed (no WM ID decoded)"
+    assert recovered.lower() == wm_payload_hex.lower(), (
+        f"blind extraction returned {recovered!r}, expected {wm_payload_hex!r}"
+    )
+    print(f"[smoke] blind extract OK: {recovered}", flush=True)
+
+
 @pytest.mark.integration
 def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     start = time.perf_counter()
@@ -70,7 +90,6 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     input_path = FIXTURES_DIR / "sample-photo.jpg"
     output_path = tmp_path / "signed.jpg"
     manifest_store = tmp_path / "manifest-store"
-    wm_payload_hex = "00112233445566778899aabbccddeeff001122334455"
     args = _build_sign_args(
         input_path=input_path,
         output_path=output_path,
@@ -79,7 +98,7 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
         keystore_url=keystore_url,
         access_token=access_token,
         bin_dir=bin_dir,
-        wm_payload_hex=wm_payload_hex,
+        wm_payload_hex=SMOKE_WM_HEX,
     )
 
     print(f"[smoke] image fixture: {input_path}", flush=True)
@@ -89,7 +108,8 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
 
     assert rc == 0
     assert output_path.exists()
-    assert (manifest_store / f"{wm_payload_hex}.c2pa").exists()
+    assert (manifest_store / f"{SMOKE_WM_HEX}.c2pa").exists()
+    _assert_blind_extract(output_path, SMOKE_WM_HEX, bin_dir)
     print(f"[smoke] image smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
@@ -101,7 +121,6 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
     input_path = FIXTURES_DIR / "big-buck-bunny-trailer-1080p.mov"
     output_path = tmp_path / "signed.mov"
     manifest_store = tmp_path / "manifest-store"
-    wm_payload_hex = "00112233445566778899aabbccddeeff001122334455"
     args = _build_sign_args(
         input_path=input_path,
         output_path=output_path,
@@ -110,7 +129,7 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
         keystore_url=keystore_url,
         access_token=access_token,
         bin_dir=bin_dir,
-        wm_payload_hex=wm_payload_hex,
+        wm_payload_hex=SMOKE_WM_HEX,
     )
 
     print(f"[smoke] video fixture: {input_path}", flush=True)
@@ -120,5 +139,6 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
 
     assert rc == 0
     assert output_path.exists()
-    assert (manifest_store / f"{wm_payload_hex}.c2pa").exists()
+    assert (manifest_store / f"{SMOKE_WM_HEX}.c2pa").exists()
+    _assert_blind_extract(output_path, SMOKE_WM_HEX, bin_dir)
     print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)

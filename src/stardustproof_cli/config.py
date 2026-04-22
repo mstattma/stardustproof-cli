@@ -22,6 +22,15 @@ _SD = _load_stardust_defaults()
 
 @dataclass
 class StardustPaths:
+    """Filesystem layout for bundled binaries.
+
+    The repo ships x86_64 Linux binaries under ``bin/``:
+
+    - ``bin/stardust/``  : ``sffw-embed``, ``extract``, ``align``
+    - ``bin/ffmpeg/bin/`` : patched static ``ffmpeg`` and ``ffprobe`` with
+                             the ``sffwembedsafe`` filter
+    """
+
     repo_root: Path = field(default_factory=_repo_root)
     custom_bin_dir: Path | None = None
 
@@ -35,6 +44,34 @@ class StardustPaths:
         return self.repo_root / "bin"
 
     @property
+    def stardust_dir(self) -> Path:
+        return self.bin_dir / "stardust"
+
+    @property
+    def ffmpeg_dir(self) -> Path:
+        return self.bin_dir / "ffmpeg" / "bin"
+
+    @property
+    def stardust_embed(self) -> Path:
+        return self.stardust_dir / "sffw-embed"
+
+    @property
+    def stardust_extract(self) -> Path:
+        return self.stardust_dir / "extract"
+
+    @property
+    def stardust_align(self) -> Path:
+        return self.stardust_dir / "align"
+
+    @property
+    def ffmpeg(self) -> Path:
+        return self.ffmpeg_dir / "ffmpeg"
+
+    @property
+    def ffprobe(self) -> Path:
+        return self.ffmpeg_dir / "ffprobe"
+
+    @property
     def candidate_bin_dirs(self) -> list[Path]:
         candidates: list[Path] = []
         if self.custom_bin_dir is not None:
@@ -42,10 +79,7 @@ class StardustPaths:
         env_bin_dir = os.environ.get("STARDUSTPROOF_BIN_DIR")
         if env_bin_dir:
             candidates.append(Path(env_bin_dir).resolve())
-        candidates.extend([
-            self.repo_root / "bin",
-            self.repo_root / "stardust_prebuilt_x64_avx2",
-        ])
+        candidates.append(self.repo_root / "bin")
         seen: set[Path] = set()
         unique: list[Path] = []
         for candidate in candidates:
@@ -54,23 +88,13 @@ class StardustPaths:
                 unique.append(candidate)
         return unique
 
-    @property
-    def stardust_embed(self) -> Path:
-        return self.bin_dir / "sffw-embed"
-
-    @property
-    def stardust_extract(self) -> Path:
-        return self.bin_dir / "extract"
-
-    @property
-    def stardust_align(self) -> Path:
-        return self.bin_dir / "align"
-
     def check_binaries(self) -> list[str]:
-        missing = []
+        missing: list[str] = []
         for name, path in [
             ("sffw-embed", self.stardust_embed),
             ("extract", self.stardust_extract),
+            ("ffmpeg", self.ffmpeg),
+            ("ffprobe", self.ffprobe),
         ]:
             if not path.exists():
                 missing.append(f"{name} ({path})")
@@ -94,5 +118,5 @@ class StardustConfig:
     stardust_pm_mode: int = _SD.get("pm_mode", 3)
     stardust_seed: int = _SD.get("seed", 1)
     stardust_fec: int = _SD.get("fec", 2)
-    stardust_bit_profile: int = _SD.get("bit_profile", 144)
+    stardust_bit_profile: int = _SD.get("bit_profile", 48)
     paths: StardustPaths = field(default_factory=StardustPaths)
