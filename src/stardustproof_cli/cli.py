@@ -46,6 +46,7 @@ def _build_config(args: argparse.Namespace) -> StardustConfig:
     config = StardustConfig()
     if args.bin_dir:
         config.paths = StardustPaths(custom_bin_dir=Path(args.bin_dir).resolve())
+    config.paths = config.paths.resolve()
     for attr, field_name in [
         ("strength", "stardust_strength"),
         ("sp_width", "stardust_sp_width"),
@@ -127,6 +128,8 @@ def cmd_sign(args: argparse.Namespace) -> int:
         manifest_bytes=manifest_bytes,
         overwrite=args.overwrite_manifest,
     )
+    media = stardust.probe_media(args.output)
+    print(f"Media type: {media.media_kind}")
     print(f"Watermarked image: {args.output}")
     print(f"Manifest store entry: {manifest_path}")
     print(f"WM ID: {args.wm_payload_hex.lower()}")

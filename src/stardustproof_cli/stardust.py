@@ -4,9 +4,19 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from stardustproof_cli.config import StardustConfig, StardustPaths
+
+
+@dataclass
+class MediaInfo:
+    width: int
+    height: int
+    frame_rate: str | None
+    has_audio: bool
+    media_kind: str
 
 
 def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -16,27 +26,45 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return result
 
 
-def _image_dimensions(image_path: str) -> tuple[int, int]:
+def probe_media(path: str) -> MediaInfo:
     result = subprocess.run(
         [
             "ffprobe",
             "-v",
             "error",
-            "-select_streams",
-            "v:0",
             "-show_entries",
-            "stream=width,height",
+            "stream=codec_type,width,height,avg_frame_rate",
             "-of",
-            "csv=p=0",
-            image_path,
+            "json",
+            path,
         ],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed on {image_path}: {result.stderr}")
-    width, height = result.stdout.strip().split(",")
-    return int(width), int(height)
+        raise RuntimeError(f"ffprobe failed on {path}: {result.stderr}")
+    import json
+
+    data = json.loads(result.stdout)
+    streams = data.get("streams", [])
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    if video_stream is None:
+        raise RuntimeError(f"No video stream found in {path}")
+    has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+    ext = Path(path).suffix.lower()
+    media_kind = "video" if ext in {".mp4", ".mov", ".m4v", ".webm"} else "image"
+    return MediaInfo(
+        width=int(video_stream["width"]),
+        height=int(video_stream["height"]),
+        frame_rate=video_stream.get("avg_frame_rate") or None,
+        has_audio=has_audio,
+        media_kind=media_kind,
+    )
+
+
+def _image_dimensions(image_path: str) -> tuple[int, int]:
+    media = probe_media(image_path)
+    return media.width, media.height
 
 
 def check_binaries(paths: StardustPaths) -> list[str]:
@@ -50,7 +78,9 @@ def check_binaries(paths: StardustPaths) -> list[str]:
 
 def embed(image_path: str, output_path: str, wm_id_hex: str, config: StardustConfig) -> str:
     paths = config.paths
-    width, height = _image_dimensions(image_path)
+    media = probe_media(image_path)
+    width = media.width
+    height = media.height
     bit_profile = len(wm_id_hex) * 4
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -93,10 +123,36 @@ def embed(image_path: str, output_path: str, wm_id_hex: str, config: StardustCon
                 str(config.stardust_fec),
             ]
         )
-        _run([
-            "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}", "-i", embedded_yuv,
-            "-frames:v", "1", output_path,
-        ])
+
+        if media.media_kind == "video":
+            frame_rate = media.frame_rate or "30"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-s",
+                f"{width}x{height}",
+                "-r",
+                frame_rate,
+                "-i",
+                embedded_yuv,
+                "-i",
+                image_path,
+                "-map",
+                "0:v:0",
+            ]
+            if media.has_audio:
+                cmd.extend(["-map", "1:a:0", "-c:a", "copy"])
+            cmd.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-shortest", output_path])
+            _run(cmd)
+        else:
+            _run([
+                "ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{width}x{height}", "-i", embedded_yuv,
+                "-frames:v", "1", output_path,
+            ])
 
         base = os.path.splitext(output_path)[0]
         shutil.copy2(cover_yuv, f"{base}.reference.yuv")

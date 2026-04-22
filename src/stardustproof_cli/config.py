@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,7 +29,30 @@ class StardustPaths:
     def bin_dir(self) -> Path:
         if self.custom_bin_dir is not None:
             return self.custom_bin_dir
+        env_bin_dir = os.environ.get("STARDUSTPROOF_BIN_DIR")
+        if env_bin_dir:
+            return Path(env_bin_dir).resolve()
         return self.repo_root / "bin"
+
+    @property
+    def candidate_bin_dirs(self) -> list[Path]:
+        candidates: list[Path] = []
+        if self.custom_bin_dir is not None:
+            candidates.append(self.custom_bin_dir)
+        env_bin_dir = os.environ.get("STARDUSTPROOF_BIN_DIR")
+        if env_bin_dir:
+            candidates.append(Path(env_bin_dir).resolve())
+        candidates.extend([
+            self.repo_root / "bin",
+            self.repo_root / "stardust_prebuilt_x64_avx2",
+        ])
+        seen: set[Path] = set()
+        unique: list[Path] = []
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                unique.append(candidate)
+        return unique
 
     @property
     def stardust_embed(self) -> Path:
@@ -51,6 +75,13 @@ class StardustPaths:
             if not path.exists():
                 missing.append(f"{name} ({path})")
         return missing
+
+    def resolve(self) -> "StardustPaths":
+        for candidate in self.candidate_bin_dirs:
+            resolved = StardustPaths(repo_root=self.repo_root, custom_bin_dir=candidate)
+            if not resolved.check_binaries():
+                return resolved
+        return self
 
 
 @dataclass

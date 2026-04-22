@@ -27,3 +27,8 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stardustproof_cli"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: end-to-end smoke tests that require external services and binaries",
+]
