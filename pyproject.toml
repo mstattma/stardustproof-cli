@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stardustproof-cli"
+version = "0.1.0"
+description = "CLI for Stardust watermarking and simplified C2PA signing"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "stardustproof-c2pa-signer @ git+https://github.com/mstattma/stardustproof-c2pa-signer-vibe.git",
+    "stardustproof-keystore[client]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+stardustproof = "stardustproof_cli.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stardustproof_cli"]

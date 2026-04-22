@@ -1,0 +1,12 @@
+{
+  "_comment": "Shared Stardust watermark parameters used by the CLI.",
+  "strength": 4,
+  "sp_width": 7,
+  "sp_height": 7,
+  "sp_density": 100,
+  "p_density": 100,
+  "pm_mode": 3,
+  "seed": 1,
+  "fec": 2,
+  "bit_profile": 144
+}
