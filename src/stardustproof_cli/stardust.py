@@ -395,7 +395,7 @@ def embed_segmented(
     # Probe per-fragment frame counts via the standalone parser so we
     # can ask ffmpeg's DASH muxer to emit the exact same number of
     # fragments, at the same frame boundaries.
-    from stardustproof_cli.media_input import parse_fragment_schedule  # local
+    from stardustproof_c2pa_signer import parse_fragment_schedule  # local
     # The schedule is embedded in each fragment's moof; accumulate
     # across the fragment file set.
     per_frag_counts: list[int] = []

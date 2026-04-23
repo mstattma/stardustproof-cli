@@ -141,14 +141,34 @@ DASH/HLS.
 
 ### Notes
 
-The embed pipeline runs as a single FFmpeg invocation:
+The sign pipeline runs in three phases:
 
-1. generate the Stardust `.pp` payload via `sffw-embed --payload-file`
-2. decode → `sffwembedsafe` filter → encode in one ffmpeg pass
-3. simplified C2PA manifest signing via `stardustproof-c2pa-signer`
-4. write detached manifest to `<manifest-store>/<wm-payload-hex>.c2pa`
+1. **Watermark** — generate the Stardust `.pp` payload via
+   `sffw-embed --payload-file`, then decode → `sffwembedsafe` filter →
+   encode in a single ffmpeg pass.
+2. **C2PA sign** — `generate_and_embed_manifest_simple` (in
+   `stardustproof-c2pa-signer`) classifies the watermarked output
+   and embeds a signed C2PA manifest into the asset in-place (JUMBF
+   box in the image / MP4 container).
+3. **Sidecar write** — the same manifest bytes are also written to
+   `<manifest-store>/<wm-payload-hex>.c2pa` as a watermark-id-keyed
+   on-disk copy.
 
-No reference YUV or metadata sidecars are produced.
+The asset therefore carries the manifest in two places:
+
+- **Embedded** in the asset itself (discoverable by any standard C2PA
+  verifier without our manifest store).
+- **On disk in the store** (discoverable by any party that blind-extracts
+  the watermark from a stripped-or-modified asset, since the store is
+  keyed by watermark id).
+
+`verify` uses `c2patool --external-manifest <store-entry>` so it
+validates against the on-disk sidecar rather than the embedded copy.
+This keeps verify semantically "watermark-first": anything that survives
+the watermark round-trip can be re-verified against the store.
+
+No reference YUV or metadata sidecars are produced by the watermark
+step.
 
 ## Verify
 

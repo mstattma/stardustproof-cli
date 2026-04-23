@@ -229,7 +229,7 @@ def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
     assert rc == 0
     assert output_path.exists()
     # Output must still be a fragmented MP4.
-    from stardustproof_cli.media_input import (
+    from stardustproof_c2pa_signer import (
         SingleFileFragmented,
         resolve_media_input,
     )

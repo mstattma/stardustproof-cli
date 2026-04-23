@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 from stardustproof_cli import stardust
 from stardustproof_cli.config import StardustConfig
-from stardustproof_cli.media_input import (
+from stardustproof_c2pa_signer import (
     MediaInput,
     MediaInputError,
     Segmented,

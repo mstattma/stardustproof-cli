@@ -10,7 +10,7 @@ from stardustproof_cli.config import StardustConfig, StardustPaths
 from stardustproof_cli.manifest_store import DirectoryManifestStore
 from stardustproof_cli import stardust
 from stardustproof_cli import verify as verify_mod
-from stardustproof_cli.media_input import (
+from stardustproof_c2pa_signer import (
     MediaInputError,
     Segmented,
     SingleFile,
@@ -199,6 +199,10 @@ def cmd_sign(args: argparse.Namespace) -> int:
     print(f"[cli] Binary checks: {time.perf_counter() - step_start:.2f}s", flush=True)
 
     # Resolve the input shape so we can dispatch to the right embed path.
+    # The signer's generate_and_embed_manifest_simple classifies the input
+    # the same way and will raise NotImplementedError for Segmented; we
+    # short-circuit here to give the user a friendlier message before
+    # spending time on the watermark step.
     try:
         media_input = resolve_media_input(Path(args.input))
     except MediaInputError as exc:
@@ -207,22 +211,21 @@ def cmd_sign(args: argparse.Namespace) -> int:
     if isinstance(media_input, Segmented):
         raise RuntimeError(
             "Signing a segmented fragmented-MP4 directory is not supported "
-            "in this release. Concatenate the segments into a single-file "
-            "fragmented MP4 first, or sign the unfragmented mezzanine and "
-            "re-fragment the signed output."
+            "in this release. The underlying c2pa-python FFI does not yet "
+            "expose Builder.sign_fragmented_files; until it does, please "
+            "concatenate the segments into a single-file fragmented MP4 "
+            "first, or sign the unfragmented mezzanine and re-fragment "
+            "the signed output. Segmented verification already works today."
         )
 
     step_start = time.perf_counter()
-    if isinstance(media_input, SingleFileFragmented):
-        media = stardust.probe_media(args.input, config.paths)
-    else:
-        media = stardust.probe_media(args.input, config.paths)
-    print(f"[cli] Media detected: {media.media_kind} {media.width}x{media.height}", flush=True)
-    if isinstance(media_input, SingleFileFragmented):
-        print(
-            f"[cli] Input shape: single-file fragmented MP4",
-            flush=True,
-        )
+    media = stardust.probe_media(args.input, config.paths)
+    shape_name = type(media_input).__name__
+    print(
+        f"[cli] Media detected: {media.media_kind} {media.width}x{media.height} "
+        f"(shape={shape_name})",
+        flush=True,
+    )
     media_probe_s = time.perf_counter() - step_start
 
     step_start = time.perf_counter()
@@ -251,6 +254,10 @@ def cmd_sign(args: argparse.Namespace) -> int:
 
     keystore = KeystoreClient(base_url=args.keystore_url, api_key=args.keystore_api_key)
     step_start = time.perf_counter()
+    # Single signer entry point handles both SingleFile and
+    # SingleFileFragmented via internal media-shape classification. No
+    # output_path override -- the signer embeds in-place at args.output,
+    # and the CLI writes the WM-ID-keyed sidecar separately below.
     manifest_bytes = generate_and_embed_manifest_simple(
         image_path=args.output,
         wm_id_bytes=payload,
