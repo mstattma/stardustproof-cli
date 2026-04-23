@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json as _json
 import sys
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from stardustproof_cli.config import StardustConfig, StardustPaths
 from stardustproof_cli.manifest_store import DirectoryManifestStore
 from stardustproof_cli import stardust
+from stardustproof_cli import verify as verify_mod
 
 
 def _parse_args() -> argparse.Namespace:
@@ -51,6 +53,68 @@ def _parse_args() -> argparse.Namespace:
     sign.add_argument("--pm-mode", type=int, default=None)
     sign.add_argument("--seed", type=int, default=None)
     sign.add_argument("--fec", type=int, default=None)
+
+    verify = sub.add_parser(
+        "verify",
+        help="Verify a watermarked asset against a detached C2PA manifest store",
+    )
+    verify.add_argument("--input", required=True, help="Watermarked asset to verify")
+    verify.add_argument(
+        "--manifest-store",
+        required=True,
+        help="Directory containing detached <wm-id>.c2pa manifests",
+    )
+    verify.add_argument(
+        "--wm-bit-profile",
+        type=int,
+        default=48,
+        help="Expected watermark payload bit length (default: 48)",
+    )
+    verify.add_argument(
+        "--trust-anchors",
+        action="append",
+        default=None,
+        help=(
+            "Path to a PEM bundle of trust anchors (repeatable). When "
+            "omitted, auto-discovers the signer package's keystore CA PEMs."
+        ),
+    )
+    verify.add_argument(
+        "--cawg-trust-anchors",
+        action="append",
+        default=None,
+        help=(
+            "Path to a PEM bundle for CAWG identity trust (repeatable). "
+            "Defaults to --trust-anchors when unset."
+        ),
+    )
+    verify.add_argument(
+        "--no-trust",
+        action="store_true",
+        help=(
+            "Skip certificate trust checks. Structure, hashes and "
+            "signature math are still validated."
+        ),
+    )
+    verify.add_argument(
+        "--bin-dir",
+        help="Directory containing bundled Stardust + ffmpeg binaries",
+    )
+    verify.add_argument(
+        "--json",
+        dest="json_output",
+        action="store_true",
+        help="Emit a single-line JSON summary on stdout instead of human text",
+    )
+    verify.add_argument("--strength", type=int, default=None)
+    verify.add_argument("--sp-width", type=int, default=None)
+    verify.add_argument("--sp-height", type=int, default=None)
+    verify.add_argument("--sp-density", type=int, default=None)
+    verify.add_argument("--p-density", type=int, default=None)
+    verify.add_argument("--pm-mode", type=int, default=None)
+    verify.add_argument("--seed", type=int, default=None)
+    verify.add_argument("--fec", type=int, default=None)
+
     return parser.parse_args()
 
 
@@ -183,10 +247,41 @@ def cmd_sign(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    trust_anchors = (
+        [Path(p).resolve() for p in args.trust_anchors] if args.trust_anchors else None
+    )
+    cawg_trust_anchors = (
+        [Path(p).resolve() for p in args.cawg_trust_anchors]
+        if args.cawg_trust_anchors
+        else None
+    )
+
+    result = verify_mod.verify_asset(
+        input_path=Path(args.input),
+        manifest_store=Path(args.manifest_store),
+        config=config,
+        wm_bit_profile=args.wm_bit_profile,
+        trust_anchors=trust_anchors,
+        cawg_trust_anchors=cawg_trust_anchors,
+        check_trust=not args.no_trust,
+    )
+
+    if args.json_output:
+        print(_json.dumps(result.to_json_dict(), sort_keys=True), flush=True)
+    else:
+        print(verify_mod.render_human(result, input_path=Path(args.input)), flush=True)
+
+    return result.exit_code
+
+
 def main() -> int:
     args = _parse_args()
     if args.command == "sign":
         return cmd_sign(args)
+    if args.command == "verify":
+        return cmd_verify(args)
     raise RuntimeError(f"Unsupported command: {args.command}")
 
 

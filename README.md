@@ -124,6 +124,45 @@ The embed pipeline runs as a single FFmpeg invocation:
 
 No reference YUV or metadata sidecars are produced.
 
+## Verify
+
+```bash
+stardustproof verify \
+  --input signed.jpg \
+  --manifest-store ./manifest-store
+```
+
+The verify command:
+
+1. blind-extracts the Stardust watermark id from the asset,
+2. looks up the matching `.c2pa` manifest in the directory store,
+3. invokes the bundled `c2patool` to validate the detached manifest
+   against the asset,
+4. asserts that the manifest's `c2pa.soft-binding` (alg
+   `castlabs.stardust`) value equals the extracted watermark id,
+5. asserts that `c2patool` reports zero validation failures.
+
+By default, trust anchors are auto-discovered from the signer package's
+`keystore/certs/{castlabs_c2pa_ca,trusted_publisher_ca}.cert.pem`. Pass
+`--trust-anchors <pem>` (repeatable) to override. Pass `--no-trust` to
+skip certificate-trust checks entirely (structure, hashes and
+signature math are still validated).
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Verified OK |
+| 1 | Argument / IO / binary / trust-material error |
+| 2 | Blind extraction found no Stardust watermark |
+| 3 | Manifest not found in store for extracted WM id |
+| 4 | `c2patool` invocation failed (non-zero exit or unparseable JSON) |
+| 5 | Soft-binding value does not match extracted WM id |
+| 6 | `c2patool` reported one or more validation failures |
+
+Add `--json` to emit a single-line JSON object on stdout instead of the
+human-readable report (useful for CI scripts).
+
 ## Test fixtures
 
 - `tests/fixtures/sample-photo.jpg` — 1920x1080 natural photo
@@ -132,17 +171,11 @@ No reference YUV or metadata sidecars are produced.
 
 ## Integration Smoke Test
 
-The integration smoke test exercises the real keystore + signer path and
-asserts both that the embedded watermark is blind-extractable from the
-signed output, **and** that the detached manifest in the local store
-verifies against the watermarked content via `c2patool`. The verification
-step uses the bundled `c2patool` shipped inside the
-`stardustproof-c2pa-signer` package (built from the pinned
-`mstattma/c2pa-rs` fork) and trusts the Trusted Publisher CA from the
-signer repo's keystore submodule. It asserts that the active manifest
-contains a `c2pa.soft-binding` with `alg=castlabs.stardust` whose value
-equals the embedded watermark id, and that c2patool reports zero
-validation failures:
+The integration smoke test exercises the real keystore + signer path,
+produces a signed asset, and then runs the productized
+`verify.verify_asset()` (the same code path `stardustproof verify`
+exposes) over the signed asset + detached manifest. This guarantees
+zero drift between the smoke and the CLI verify behavior:
 
 ```bash
 export STARDUSTPROOF_TEST_KEYSTORE_URL=http://localhost:2001
