@@ -155,6 +155,17 @@ bash scripts/run_smoke.sh
 
 Expected duration: ~50-60 s for six tests.
 
+### Long-video scale test (opt-in, separate from smoke)
+
+`tests/test_long_video_scale.py` is **not** part of `run_smoke.sh`
+— it is a separate opt-in test that sign+verifies a 10-minute
+(or, gated, 60-minute) 1080p clip to measure the pipeline's
+real-time throughput envelope. Opt in via
+`STARDUSTPROOF_TEST_LONG_VIDEO=1`. Reference run on WSL2 was
+~294s wall for a 10-min clip; the committed default budget is
+450s. See the CLI README's "Long-video scale test (opt-in)"
+section for the full timings table and the knobs.
+
 ## Rules
 
 - **Binaries under `bin/` are committed.** Rebuild via

@@ -347,10 +347,12 @@ committed BBB trailer. It is skipped by default and opts in via
 env flag:
 
 ```bash
-# 10-minute variant (default 300s budget)
+# 10-minute variant (default 450s budget)
 STARDUSTPROOF_TEST_LONG_VIDEO=1 pytest -v tests/test_long_video_scale.py
 
-# 60-minute variant (default 1800s budget)
+# 60-minute variant (default 1800s budget). Seconds MUST be >= 1800
+# or the test fails with a clear error -- it refuses to run against
+# a <30-minute fixture.
 STARDUSTPROOF_TEST_LONG_VIDEO=very-long \
   STARDUSTPROOF_TEST_LONG_VIDEO_SECONDS=3600 \
   pytest -v tests/test_long_video_scale.py
@@ -361,8 +363,32 @@ Knobs:
 - `STARDUSTPROOF_TEST_LONG_VIDEO` — `1` for the 10-minute default,
   `very-long` for the 60-minute variant; unset to skip.
 - `STARDUSTPROOF_TEST_LONG_VIDEO_SECONDS` — override the generated
-  clip duration (default `600`).
+  clip duration (default `600`). Required to be `>= 1800` when
+  mode is `very-long`.
 - `STARDUSTPROOF_TEST_LONG_VIDEO_BUDGET_SECONDS` — wall-time budget
-  for sign+verify (default `300` for the 10-minute variant, `1800`
+  for sign+verify (default `450` for the 10-minute variant, `1800`
   for the 60-minute variant). The test asserts total pipeline time
   stays within this cap.
+
+#### Observed on reference hardware
+
+WSL2 reference run, 2026-04-24 (10-minute variant):
+
+| Phase | Wall time |
+|-------|-----------|
+| Fixture generation (stream-copy 10 min @ 1080p, 538 MB) | 9.3s |
+| Watermark embed (ffmpeg + Stardust, 1080p veryfast crf 18) | 259.3s |
+| Manifest sign + embed (animated WebP thumb, C2PA claim via keystore) | 31.0s |
+| Blind-extract (first keyframe of signed MOV) | 0.9s |
+| c2patool verify (embedded manifest + detached sidecar) | 1.2s |
+| **Sign total** | **290.7s** |
+| **Verify total** | **2.8s** |
+| **Grand total** | **293.6s** |
+
+Default budget is set to `max(ceil(observed × 1.5, step=10), 300)`
+= **450s**. Override via `STARDUSTPROOF_TEST_LONG_VIDEO_BUDGET_SECONDS`
+on slower hardware.
+
+The pipeline runs at ~2.0× real-time for the 10-minute variant
+(wall/content), so the 60-minute default budget of 1800s
+(= 0.5× real-time wall budget) leaves a similar ~1.5× headroom.

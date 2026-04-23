@@ -70,7 +70,12 @@ def _long_video_budget_seconds() -> int:
             return int(raw)
         except ValueError:
             pass
-    return 300  # 5 minutes wall-time budget for a 10-minute sign+verify
+    # Calibrated from a WSL2 reference run (2026-04-24): total =
+    # 293.55s (embed 259.4s + sign 31.0s + verify 2.8s) on a 10-min
+    # 1080p stream-looped BBB trailer. Default is max(ceil(observed
+    # * 1.5, step=10), 300) = 450s. Override via
+    # STARDUSTPROOF_TEST_LONG_VIDEO_BUDGET_SECONDS on slower hardware.
+    return 450
 
 
 @pytest.fixture(scope="module")
@@ -212,9 +217,26 @@ def test_sign_verify_very_long_video(long_video_mov, tmp_path):
     keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
 
     seconds = _long_video_seconds()
-    # Default budget for the very-long variant is 1800s (30 min) since
-    # the input itself is 60 min at 1x real-time isn't the bottleneck;
-    # h264 veryfast encode + blind-extract dominate.
+    # Guardrail: very-long mode MUST be paired with a genuinely
+    # long fixture (>= 30 min). Otherwise the test silently falls
+    # back to the 10-minute default and runs against a clip that
+    # validates nothing the 10-minute test does not already cover
+    # -- the operator clearly intended the hour-long variant and
+    # deserves a loud error, not a silent no-op.
+    if seconds < 1800:
+        pytest.fail(
+            "STARDUSTPROOF_TEST_LONG_VIDEO=very-long requires "
+            "STARDUSTPROOF_TEST_LONG_VIDEO_SECONDS >= 1800 "
+            f"(got {seconds}). Refusing to run the very-long variant "
+            "against a <30-minute fixture -- it would silently validate "
+            "nothing meaningful. Set the env var explicitly, e.g. "
+            "STARDUSTPROOF_TEST_LONG_VIDEO_SECONDS=3600 for a 60-min run."
+        )
+
+    # Default budget for the very-long variant is 1800s (30 min). The
+    # 10-min calibration showed sign+verify ran at ~2x real-time
+    # (294s wall for 600s content), so a 60-min clip should land
+    # around ~1800s. Override on slower hardware.
     budget_seconds = int(
         os.environ.get("STARDUSTPROOF_TEST_LONG_VIDEO_BUDGET_SECONDS", "1800")
     )
