@@ -50,6 +50,7 @@ def _build_sign_args(
     bin_dir: str,
     wm_payload_hex: str,
     thumbnail: bool = True,
+    title: "str | None" = None,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command="sign",
@@ -71,6 +72,7 @@ def _build_sign_args(
         video_crf=18,
         in_place=False,
         force=False,
+        title=title,
         strength=None,
         sp_width=None,
         sp_height=None,
@@ -274,6 +276,36 @@ def _assert_video_preview_anim_assertion(
     return timestamps
 
 
+def _assert_manifest_title(signed_asset: Path, mime: str, expected_title: str) -> None:
+    """Open the signed asset via c2pa.Reader and assert the manifest's
+    top-level title matches ``expected_title``. Empty string means no
+    title field should be present.
+    """
+    import json
+    try:
+        import c2pa
+    except ImportError:
+        pytest.skip("c2pa-python not installed; cannot verify manifest title")
+
+    with open(signed_asset, "rb") as fh:
+        reader = c2pa.Reader(mime, fh)
+    report = json.loads(reader.json())
+    manifests = report.get("manifests", {})
+    assert manifests, "c2pa.Reader report has no manifests"
+    active = report.get("active_manifest") or next(iter(manifests))
+    manifest = manifests[active]
+    actual_title = manifest.get("title")
+    if expected_title == "":
+        assert not actual_title, (
+            f"expected no title field but got {actual_title!r}"
+        )
+    else:
+        assert actual_title == expected_title, (
+            f"expected title {expected_title!r}, got {actual_title!r}"
+        )
+    print(f"[smoke] manifest title OK: {actual_title!r}", flush=True)
+
+
 def _decode_stored_webp_via_pillow(
     manifest_store: Path,
     wm_payload_hex: str,
@@ -371,6 +403,7 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     assert manifest_path.exists()
     result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
     _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    _assert_manifest_title(output_path, "image/jpeg", input_path.name)
     print(f"[smoke] image smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
@@ -408,7 +441,55 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
     _decode_stored_webp_via_pillow(
         manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
     )
+    _assert_manifest_title(output_path, "video/quicktime", input_path.name)
     print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
+
+
+@pytest.mark.integration
+def test_sign_image_with_custom_title(tmp_path: Path):
+    """--title override overrides the default input-basename title."""
+    keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+
+    input_path = FIXTURES_DIR / "sample-photo.jpg"
+    output_path = tmp_path / "signed.jpg"
+    manifest_store = tmp_path / "manifest-store"
+    custom = "Press Photo 2024 Q4"
+    args = _build_sign_args(
+        input_path=input_path,
+        output_path=output_path,
+        manifest_store=manifest_store,
+        org_uuid=org_uuid,
+        keystore_url=keystore_url,
+        access_token=access_token,
+        bin_dir=bin_dir,
+        wm_payload_hex=SMOKE_WM_HEX,
+        title=custom,
+    )
+    assert cmd_sign(args) == 0
+    _assert_manifest_title(output_path, "image/jpeg", custom)
+
+
+@pytest.mark.integration
+def test_sign_image_with_empty_title_suppresses_field(tmp_path: Path):
+    """--title '' explicitly opts out of emitting a title."""
+    keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+
+    input_path = FIXTURES_DIR / "sample-photo.jpg"
+    output_path = tmp_path / "signed.jpg"
+    manifest_store = tmp_path / "manifest-store"
+    args = _build_sign_args(
+        input_path=input_path,
+        output_path=output_path,
+        manifest_store=manifest_store,
+        org_uuid=org_uuid,
+        keystore_url=keystore_url,
+        access_token=access_token,
+        bin_dir=bin_dir,
+        wm_payload_hex=SMOKE_WM_HEX,
+        title="",
+    )
+    assert cmd_sign(args) == 0
+    _assert_manifest_title(output_path, "image/jpeg", "")
 
 
 @pytest.mark.integration
@@ -462,6 +543,7 @@ def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
     _decode_stored_webp_via_pillow(
         manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
     )
+    _assert_manifest_title(output_path, "video/mp4", input_path.name)
     print(
         f"[smoke] single-file fragmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
@@ -525,6 +607,7 @@ def test_sign_segmented_smoke_with_real_keystore(tmp_path: Path):
     _decode_stored_webp_via_pillow(
         manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
     )
+    _assert_manifest_title(output_path / "init.m4s", "video/mp4", input_path.name)
     print(
         f"[smoke] segmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
@@ -621,6 +704,7 @@ def test_sign_segmented_in_place_smoke_with_real_keystore(tmp_path: Path):
     _decode_stored_webp_via_pillow(
         manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
     )
+    _assert_manifest_title(work_dir / "init.m4s", "video/mp4", work_dir.name)
 
     # Confirm the committed repo fixture was NOT touched.
     assert (src_fixture / "init.m4s").exists()

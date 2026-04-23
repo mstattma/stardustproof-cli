@@ -73,6 +73,18 @@ def _parse_args() -> argparse.Namespace:
             "used) to proceed with a non-empty output directory."
         ),
     )
+    sign.add_argument(
+        "--title",
+        default=None,
+        help=(
+            "Human-readable title to embed in the C2PA manifest. Shown as "
+            "the asset name by Adobe's verify.contentauthenticity.org and "
+            "other spec-conformant verifiers. Defaults to the input "
+            "file/directory basename. Pass '' (empty string) to suppress "
+            "the title field entirely (verifiers will show 'Untitled "
+            "asset')."
+        ),
+    )
     sign.add_argument("--strength", type=int, default=None)
     sign.add_argument("--sp-width", type=int, default=None)
     sign.add_argument("--sp-height", type=int, default=None)
@@ -350,6 +362,17 @@ def cmd_sign(args: argparse.Namespace) -> int:
         # ---- C2PA sign step --------------------------------------------
         keystore = KeystoreClient(base_url=args.keystore_url, api_key=args.keystore_api_key)
         step_start = time.perf_counter()
+        # Title defaults to the INPUT basename so consumer verifiers
+        # (Adobe's verify.contentauthenticity.org et al.) display the
+        # user-facing name of the asset the caller started with, not
+        # the intermediate watermark-output name. args.title=None ->
+        # derive here. args.title='' -> explicit opt-out, propagate so
+        # signer omits the title field.
+        if args.title is None:
+            effective_title = Path(args.input).name
+        else:
+            effective_title = args.title
+
         if is_segmented:
             # Segmented signer requires an explicit output_path. For
             # --in-place we sign into a scratch dir and swap files over
@@ -372,6 +395,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
                     output_path=signer_output_dir,
                     wm_id_bytes=payload,
                     thumbnail=args.thumbnail,
+                    title=effective_title,
                     claim_generator_info=[{"name": args.claim_generator_name, "version": args.claim_generator_version}],
                     keystore_url=args.keystore_url,
                     keystore_api_key=args.keystore_api_key,
@@ -416,6 +440,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
                 image_path=args.output,
                 wm_id_bytes=payload,
                 thumbnail=args.thumbnail,
+                title=effective_title,
                 claim_generator_info=[{"name": args.claim_generator_name, "version": args.claim_generator_version}],
                 keystore_url=args.keystore_url,
                 keystore_api_key=args.keystore_api_key,

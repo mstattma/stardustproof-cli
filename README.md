@@ -162,6 +162,32 @@ store as usual, keyed by the watermark id.
 | `--in-place` | Atomically replace the input directory contents with the signed output. `--output` must equal `--input` (or be omitted, in which case it defaults to `--input`). Interrupted signs leave the input tree in a partially-replaced state; prefer a separate `--output` for production. |
 | `--force` | For Segmented inputs with a non-empty `--output` directory, overwrite existing files. |
 
+### Manifest title
+
+Every signed manifest carries a top-level `title` field. Adobe's
+[verify.contentauthenticity.org](https://verify.contentauthenticity.org)
+and other spec-conformant C2PA verifiers display the title as the
+asset name; without it the verifier shows "Untitled asset".
+
+| Flag | Purpose |
+|---|---|
+| `--title <string>` | Human-readable title. Defaults to the input file/directory basename (e.g. `photo.jpg` or `my-dash-tree` for a segmented directory). Pass `--title ""` to suppress the title field entirely (the verifier will show "Untitled asset") — useful for privacy-leaning workflows that should not leak the original filename. |
+
+Examples:
+
+```bash
+# Default: title = 'sample-photo.jpg'
+stardustproof sign --input sample-photo.jpg --output signed.jpg ...
+
+# Custom title for publication:
+stardustproof sign --input raw-input.jpg --output signed.jpg \
+  --title "Press Photo 2024 Q4" ...
+
+# Privacy: suppress title entirely.
+stardustproof sign --input private.jpg --output signed.jpg \
+  --title "" ...
+```
+
 ### Video thumbnails (animated WebP)
 
 Video manifests carry an animated WebP `c2pa.thumbnail.claim` assertion
