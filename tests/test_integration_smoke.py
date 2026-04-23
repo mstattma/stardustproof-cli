@@ -358,13 +358,22 @@ def _decode_stored_webp_via_pillow(
     from io import BytesIO
     img = Image.open(BytesIO(webp_bytes))
     img.load()
-    assert img.is_animated, "stored WebP is not animated"
-    assert img.n_frames == expected_frames, (
-        f"stored WebP has {img.n_frames} frames, expected {expected_frames}"
+    if expected_frames > 1:
+        assert img.is_animated, "stored WebP is not animated"
+    n_frames = getattr(img, "n_frames", 1)
+    assert n_frames == expected_frames, (
+        f"stored WebP has {n_frames} frames, expected {expected_frames}"
     )
     longest = max(img.size)
     assert longest >= min_longest_edge, (
         f"stored WebP longest edge is {longest}, expected >= {min_longest_edge}"
+    )
+    # Default thumbnail budget is 848 px longest-edge; if the source
+    # asset was larger than 848 px in its longest dimension it must
+    # have been shrunk here. (Callers that sign tiny synthetic inputs
+    # may legitimately have a <848 px thumbnail.)
+    assert longest <= 848, (
+        f"stored WebP longest edge is {longest}, expected <= 848 (default budget)"
     )
     print(
         f"[smoke] WebP decode OK: {len(webp_bytes)} bytes, "
@@ -402,7 +411,18 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
     result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
-    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    # Image thumbnails are now still WebP (replaces the legacy JPEG
+    # path + c2pa-rs's auto-PNG). Expect image/webp, not just image/*.
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/webp")
+    # And the stored manifest sidecar contains a single-frame WebP
+    # whose longest edge matches the default 848 px budget (source is
+    # a 1080p photo, so the thumbnail MUST have been downscaled).
+    _decode_stored_webp_via_pillow(
+        manifest_store,
+        SMOKE_WM_HEX,
+        expected_frames=1,
+        min_longest_edge=1,
+    )
     _assert_manifest_title(output_path, "image/jpeg", input_path.name)
     print(f"[smoke] image smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
