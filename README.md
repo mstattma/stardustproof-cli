@@ -162,6 +162,33 @@ store as usual, keyed by the watermark id.
 | `--in-place` | Atomically replace the input directory contents with the signed output. `--output` must equal `--input` (or be omitted, in which case it defaults to `--input`). Interrupted signs leave the input tree in a partially-replaced state; prefer a separate `--output` for production. |
 | `--force` | For Segmented inputs with a non-empty `--output` directory, overwrite existing files. |
 
+### Video thumbnails (animated WebP)
+
+Video manifests carry an animated WebP `c2pa.thumbnail.claim` assertion
+by default: a 5-frame, 848 px longest-edge, 500 ms-per-frame loop
+assembled from the most "meaningful" candidate frames sampled across
+the first 60 seconds of the asset. Alongside it the signer emits a
+`castlabs.video.preview.anim` assertion with per-frame source
+timestamps so consumers can cross-reference the preview against the
+underlying content.
+
+All seven generation knobs are env-var configurable:
+
+| Var | Default |
+|---|---|
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_FRAMES` | 5 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_LONGEST_EDGE` | 848 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_FRAME_DURATION_MS` | 500 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_MAX_BYTES` | 256000 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_CANDIDATES` | 20 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_SKIP_SECONDS` | 1 |
+| `STARDUSTPROOF_VIDEO_THUMBNAIL_MAX_SPAN_SECONDS` | 60 |
+
+See the [signer README](../stardustproof-c2pa-signer-vibe/README.md#thumbnails)
+for the full schema and algorithm details. Video thumbnail
+generation failures (missing ffmpeg, too-few candidate frames,
+oversized WebP, etc.) abort signing with a `RuntimeError`.
+
 ### Notes
 
 The sign pipeline runs in three phases:

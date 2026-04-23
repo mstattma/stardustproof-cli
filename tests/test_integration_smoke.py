@@ -206,6 +206,141 @@ def _assert_manifest_has_thumbnail(verify_result, *, expected_mime_prefix: str =
     print(f"[smoke] thumbnail assertion OK: label={found_label} mime={found_mime}", flush=True)
 
 
+def _find_manifest(verify_result) -> dict:
+    """Locate the active manifest dict in a c2patool --detailed report."""
+    report = verify_result.report
+    assert isinstance(report, dict), "verify result missing c2patool report"
+    container = report.get("manifest_store", report)
+    manifests = container.get("manifests")
+    assert isinstance(manifests, dict) and manifests
+    active = (
+        container.get("active_manifest")
+        or container.get("activeManifest")
+        or next(iter(manifests))
+    )
+    return manifests[active]
+
+
+def _assert_video_preview_anim_assertion(
+    verify_result, *, expected_frames: int,
+) -> list[float]:
+    """Assert that the signed manifest carries a
+    ``castlabs.video.preview.anim`` assertion with the expected frame
+    count and monotonically-ascending source timestamps. Returns the
+    timestamp list for further inspection by the caller.
+    """
+    manifest = _find_manifest(verify_result)
+    anim_data = None
+
+    # Shape 1: assertion_store keyed by label.
+    assertion_store = manifest.get("assertion_store")
+    if isinstance(assertion_store, dict):
+        val = assertion_store.get("castlabs.video.preview.anim")
+        if isinstance(val, dict):
+            anim_data = val
+
+    # Shape 2: legacy assertions list.
+    if anim_data is None:
+        for entry in manifest.get("assertions", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("label") == "castlabs.video.preview.anim":
+                d = entry.get("data")
+                if isinstance(d, dict):
+                    anim_data = d
+                    break
+
+    assert anim_data is not None, (
+        f"castlabs.video.preview.anim missing; assertion_store keys: "
+        f"{list(assertion_store.keys()) if isinstance(assertion_store, dict) else 'n/a'}; "
+        f"assertion labels: "
+        f"{[a.get('label') for a in (manifest.get('assertions') or []) if isinstance(a, dict)]}"
+    )
+    assert anim_data.get("format") == "image/webp", anim_data.get("format")
+    frames = anim_data.get("frames")
+    assert isinstance(frames, list) and len(frames) == expected_frames, (
+        f"expected {expected_frames} frames, got "
+        f"{len(frames) if isinstance(frames, list) else type(frames).__name__}"
+    )
+    timestamps = [float(f["source_time_s"]) for f in frames]
+    assert timestamps == sorted(timestamps), (
+        f"source_time_s not monotonic: {timestamps}"
+    )
+    print(
+        f"[smoke] castlabs.video.preview.anim OK: {len(frames)} frames, "
+        f"timestamps={[round(t, 2) for t in timestamps]}",
+        flush=True,
+    )
+    return timestamps
+
+
+def _decode_stored_webp_via_pillow(
+    manifest_store: Path,
+    wm_payload_hex: str,
+    *,
+    expected_frames: int,
+    min_longest_edge: int,
+) -> None:
+    """Open the stored manifest sidecar, extract the embedded WebP
+    resource, decode with Pillow, and verify frame count and min size.
+
+    The on-disk ``.c2pa`` sidecar is a raw JUMBF box. Rather than
+    reimplementing a JUMBF parser here, we walk the signed asset
+    instead: c2pa-rs's Reader can pull named resources out of either
+    an embedded asset or a detached manifest. We use
+    ``c2pa.Reader(asset_mime, asset_bytes, manifest_bytes)`` when
+    manifest bytes are given explicitly.
+
+    For fragmented inputs the asset is a directory; we keep things
+    simple by loading the embedded manifest from the .c2pa file via
+    Reader.from_json(manifest_bytes) is not supported, so we
+    grep-extract the WebP resource from the JUMBF by locating the
+    RIFF/WEBP magic directly. This is robust because JUMBF stores
+    the embedded resource bytes verbatim.
+    """
+    manifest_path = manifest_store / f"{wm_payload_hex.lower()}.c2pa"
+    data = manifest_path.read_bytes()
+    # Find RIFF...WEBP -- both magic markers together. RIFF is 4 bytes,
+    # WEBP is at offset 8, so search for b"RIFF" and verify WEBP at +8.
+    idx = 0
+    webp_bytes: bytes | None = None
+    while True:
+        hit = data.find(b"RIFF", idx)
+        if hit < 0:
+            break
+        if hit + 12 <= len(data) and data[hit + 8 : hit + 12] == b"WEBP":
+            # RIFF file size is at hit+4 (little-endian u32). Total is
+            # size + 8 bytes (RIFF header + size field).
+            size_le = int.from_bytes(data[hit + 4 : hit + 8], "little")
+            total = size_le + 8
+            if hit + total <= len(data):
+                webp_bytes = data[hit : hit + total]
+                break
+        idx = hit + 4
+
+    assert webp_bytes is not None, (
+        f"no RIFF/WEBP resource found inside {manifest_path}"
+    )
+
+    from PIL import Image
+    from io import BytesIO
+    img = Image.open(BytesIO(webp_bytes))
+    img.load()
+    assert img.is_animated, "stored WebP is not animated"
+    assert img.n_frames == expected_frames, (
+        f"stored WebP has {img.n_frames} frames, expected {expected_frames}"
+    )
+    longest = max(img.size)
+    assert longest >= min_longest_edge, (
+        f"stored WebP longest edge is {longest}, expected >= {min_longest_edge}"
+    )
+    print(
+        f"[smoke] WebP decode OK: {len(webp_bytes)} bytes, "
+        f"{img.n_frames} frames, {img.size}",
+        flush=True,
+    )
+
+
 @pytest.mark.integration
 def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     start = time.perf_counter()
@@ -268,7 +403,11 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
     result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
-    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/webp")
+    _assert_video_preview_anim_assertion(result, expected_frames=5)
+    _decode_stored_webp_via_pillow(
+        manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
+    )
     print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
@@ -318,7 +457,11 @@ def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
     result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
-    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/webp")
+    _assert_video_preview_anim_assertion(result, expected_frames=5)
+    _decode_stored_webp_via_pillow(
+        manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
+    )
     print(
         f"[smoke] single-file fragmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
@@ -377,7 +520,11 @@ def test_sign_segmented_smoke_with_real_keystore(tmp_path: Path):
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
     result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
-    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/webp")
+    _assert_video_preview_anim_assertion(result, expected_frames=5)
+    _decode_stored_webp_via_pillow(
+        manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
+    )
     print(
         f"[smoke] segmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
@@ -469,7 +616,11 @@ def test_sign_segmented_in_place_smoke_with_real_keystore(tmp_path: Path):
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
     result = _verify_via_cli(work_dir, manifest_store, SMOKE_WM_HEX, bin_dir)
-    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/webp")
+    _assert_video_preview_anim_assertion(result, expected_frames=5)
+    _decode_stored_webp_via_pillow(
+        manifest_store, SMOKE_WM_HEX, expected_frames=5, min_longest_edge=800,
+    )
 
     # Confirm the committed repo fixture was NOT touched.
     assert (src_fixture / "init.m4s").exists()
