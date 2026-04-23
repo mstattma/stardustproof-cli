@@ -45,8 +45,23 @@ def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return result
 
 
-def probe_media(path: str, paths: StardustPaths) -> MediaInfo:
-    """Probe media dimensions and audio presence using the bundled ffprobe."""
+def probe_media(
+    path: str,
+    paths: StardustPaths,
+    *,
+    stdin_bytes: bytes | None = None,
+) -> MediaInfo:
+    """Probe media dimensions and audio presence using the bundled ffprobe.
+
+    When ``stdin_bytes`` is provided, ffprobe reads from stdin (``pipe:0``)
+    instead of the filesystem path. This is used for segmented fMP4
+    inputs where the init segment and a media fragment must be
+    concatenated on the fly to form a decodable stream.
+    """
+    input_arg = "pipe:0" if stdin_bytes is not None else path
+    run_kwargs = {"capture_output": True, "text": stdin_bytes is None}
+    if stdin_bytes is not None:
+        run_kwargs["input"] = stdin_bytes
     result = subprocess.run(
         [
             str(paths.ffprobe),
@@ -56,13 +71,15 @@ def probe_media(path: str, paths: StardustPaths) -> MediaInfo:
             "stream=codec_type,width,height,avg_frame_rate",
             "-of",
             "json",
-            path,
+            input_arg,
         ],
-        capture_output=True,
-        text=True,
+        **run_kwargs,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed on {path}: {result.stderr}")
+        err = result.stderr
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
+        raise RuntimeError(f"ffprobe failed on {path}: {err}")
 
     data = json.loads(result.stdout)
     streams = data.get("streams", [])
@@ -221,19 +238,300 @@ def embed(
     return media
 
 
+# ---------------------------------------------------------------------------
+# Fragmented-input sign paths
+# ---------------------------------------------------------------------------
+
+
+def _sffwembedsafe_filter_str(payload_file: str, config: StardustConfig) -> str:
+    """Build the ``sffwembedsafe`` filter descriptor string."""
+    return (
+        f"sffwembedsafe="
+        f"strength={config.stardust_strength}:"
+        f"pixel_density={config.stardust_p_density}:"
+        f"superpixel_density={config.stardust_sp_density}:"
+        f"pm_mode={config.stardust_pm_mode}:"
+        f"seed={config.stardust_seed}:"
+        f"fec={config.stardust_fec}:"
+        f"payload_file={payload_file}"
+    )
+
+
+def _fragment_boundary_timestamps(schedule, frame_rate: float) -> list[float]:
+    """Convert a parsed fragment schedule into a list of seconds-offsets
+    at which each NEW fragment should start (excluding the leading 0).
+
+    Given ``schedule = [F0, F1, F2, ...]`` with per-fragment frame
+    counts ``F[i].sample_count``, returns
+    ``[F0.count/fps, (F0+F1).count/fps, ...]`` so that each entry
+    corresponds to the start timestamp of fragments 1, 2, 3, ...
+    """
+    timestamps: list[float] = []
+    running = 0
+    for i, info in enumerate(schedule):
+        if i == 0:
+            running = info.sample_count
+            continue
+        timestamps.append(running / frame_rate)
+        running += info.sample_count
+    return timestamps
+
+
+def embed_single_file_fragmented(
+    input_path: str,
+    output_path: str,
+    wm_id_hex: str,
+    config: StardustConfig,
+    fragment_schedule: list,
+    *,
+    video_preset: str = "veryfast",
+    video_crf: int = 18,
+) -> MediaInfo:
+    """Watermark a single-file fragmented MP4, preserving per-fragment
+    frame counts in the output.
+
+    The output is a single-file fragmented MP4 whose moof/mdat pairs
+    cover the same frame ranges as the input. We achieve this by
+    passing ``-force_key_frames <timestamps>`` derived from the input
+    schedule + ``-movflags +frag_custom`` so ffmpeg emits one fragment
+    per keyframe boundary.
+    """
+    paths = config.paths
+    embed_start = time.perf_counter()
+    media = probe_media(input_path, paths)
+    _log(
+        f"Embedding watermark into single-file fragmented "
+        f"{media.width}x{media.height} ({len(fragment_schedule)} fragments): {input_path}"
+    )
+
+    # Use the input's frame rate. avg_frame_rate may be "25/1"; parse.
+    frame_rate = 24.0
+    if media.frame_rate:
+        try:
+            num, den = media.frame_rate.split("/")
+            frame_rate = float(num) / float(den) if float(den) else float(num)
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    boundary_ts = _fragment_boundary_timestamps(fragment_schedule, frame_rate)
+    force_kf = ",".join(f"{t:.6f}" for t in boundary_ts) if boundary_ts else ""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pp_path = os.path.join(tmp, "wm.pp")
+        _generate_payload(pp_path, wm_id_hex, media, config)
+
+        filter_str = _sffwembedsafe_filter_str(pp_path, config)
+        cmd = [
+            str(paths.ffmpeg),
+            "-y", "-hide_banner",
+            "-loglevel", "info" if _is_verbose() else "warning",
+            "-i", input_path,
+            "-vf", filter_str,
+            "-map", "0:v:0",
+        ]
+        if media.has_audio:
+            cmd += ["-map", "0:a:0?", "-c:a", "copy"]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", video_preset,
+            "-crf", str(video_crf),
+            "-pix_fmt", "yuv420p",
+        ]
+        if force_kf:
+            cmd += ["-force_key_frames", force_kf]
+        # Fragmented-MP4 output: one moof per keyframe boundary. The
+        # frag_keyframe flag means: start a new fragment at every
+        # keyframe; combined with -force_key_frames this yields the
+        # same number of fragments as the input.
+        cmd += [
+            "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+            "-f", "mp4",
+            output_path,
+        ]
+
+        step_start = time.perf_counter()
+        _run(cmd)
+        _log(f"ffmpeg_pipeline: {time.perf_counter() - step_start:.2f}s")
+
+    _log(f"embed_total: {time.perf_counter() - embed_start:.2f}s")
+    return media
+
+
+def embed_segmented(
+    init_path: str,
+    fragment_paths: list,
+    output_dir: str,
+    wm_id_hex: str,
+    config: StardustConfig,
+    *,
+    video_preset: str = "veryfast",
+    video_crf: int = 18,
+) -> MediaInfo:
+    """Watermark a segmented fragmented-MP4 (init + media fragments) into
+    an output directory containing a regenerated init + watermarked
+    fragment files.
+
+    Input fragments are concatenated with the init on the fly (piped
+    into ffmpeg's stdin) so no intermediate on-disk concatenation is
+    required. Output uses the DASH muxer which emits a separate init
+    segment plus per-fragment files.
+
+    Output naming:
+        <output_dir>/init.m4s
+        <output_dir>/seg-NNNN.m4s  (one per input fragment, natural order)
+    """
+    paths = config.paths
+    embed_start = time.perf_counter()
+
+    # Probe using init + first fragment piped together so ffprobe can
+    # see the codec config.
+    probe_bytes = read_segmented_init_plus_first_fragment(init_path, fragment_paths[0])
+    media = probe_media(init_path, paths, stdin_bytes=probe_bytes)
+    _log(
+        f"Embedding watermark into segmented fMP4 "
+        f"{media.width}x{media.height} ({len(fragment_paths)} fragments)"
+    )
+
+    # Probe per-fragment frame counts via the standalone parser so we
+    # can ask ffmpeg's DASH muxer to emit the exact same number of
+    # fragments, at the same frame boundaries.
+    from stardustproof_cli.media_input import parse_fragment_schedule  # local
+    # The schedule is embedded in each fragment's moof; accumulate
+    # across the fragment file set.
+    per_frag_counts: list[int] = []
+    for frag_path in fragment_paths:
+        sched = parse_fragment_schedule(Path(frag_path))
+        per_frag_counts.append(sched[0].sample_count if sched else 0)
+
+    frame_rate = 24.0
+    if media.frame_rate:
+        try:
+            num, den = media.frame_rate.split("/")
+            frame_rate = float(num) / float(den) if float(den) else float(num)
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    # Build force_key_frames timestamps from the cumulative per-fragment
+    # sample counts (in frames) divided by frame rate.
+    boundary_ts: list[float] = []
+    running = 0
+    for i, count in enumerate(per_frag_counts):
+        if i == 0:
+            running = count
+            continue
+        boundary_ts.append(running / frame_rate)
+        running += count
+    force_kf = ",".join(f"{t:.6f}" for t in boundary_ts) if boundary_ts else ""
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pp_path = os.path.join(tmp, "wm.pp")
+        _generate_payload(pp_path, wm_id_hex, media, config)
+        filter_str = _sffwembedsafe_filter_str(pp_path, config)
+
+        # Output goes to a DASH manifest in the output directory; the
+        # DASH muxer emits init.m4s + seg-NNNN.m4s with the template we
+        # provide, matching our resolver's expected layout.
+        manifest_path = os.path.join(output_dir, "manifest.mpd")
+
+        cmd = [
+            str(paths.ffmpeg),
+            "-y", "-hide_banner",
+            "-loglevel", "info" if _is_verbose() else "warning",
+            "-f", "mp4",
+            "-i", "pipe:0",
+            "-vf", filter_str,
+            "-map", "0:v:0",
+            "-c:v", "libx264",
+            "-preset", video_preset,
+            "-crf", str(video_crf),
+            "-pix_fmt", "yuv420p",
+        ]
+        if force_kf:
+            cmd += ["-force_key_frames", force_kf]
+        cmd += [
+            "-f", "dash",
+            "-seg_duration", "4",
+            "-use_template", "1",
+            "-use_timeline", "0",
+            "-init_seg_name", "init.m4s",
+            "-media_seg_name", "seg-$Number%04d$.m4s",
+            "-adaptation_sets", "id=0,streams=v",
+            manifest_path,
+        ]
+
+        # Stream init+fragments bytes to ffmpeg stdin.
+        step_start = time.perf_counter()
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            with open(init_path, "rb") as fh:
+                proc.stdin.write(fh.read())
+            for frag_path in fragment_paths:
+                with open(frag_path, "rb") as fh:
+                    # stream in chunks to avoid huge-allocation spikes
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        proc.stdin.write(chunk)
+            proc.stdin.close()
+            stdout, stderr = proc.communicate(timeout=600)
+        except Exception:
+            proc.kill()
+            raise
+        if proc.returncode != 0:
+            err = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else stderr
+            raise RuntimeError(f"ffmpeg segmented embed failed: {err}")
+        _log(f"ffmpeg_pipeline: {time.perf_counter() - step_start:.2f}s")
+
+        # Clean up the DASH manifest file; our output directory
+        # contains only BMFF artifacts per the Segmented resolver spec.
+        try:
+            os.remove(manifest_path)
+        except OSError:
+            pass
+
+    _log(f"embed_total: {time.perf_counter() - embed_start:.2f}s")
+    return media
+
+
+def read_segmented_init_plus_first_fragment(init_path: str, fragment_path: str) -> bytes:
+    """Concatenate an init segment and one media segment into a single
+    self-contained BMFF byte blob suitable for piping to ffmpeg/ffprobe
+    via stdin.
+
+    Used by verify (blind-extract on segmented fMP4) and by ffprobe in
+    the verify path.
+    """
+    with open(init_path, "rb") as fh:
+        init_bytes = fh.read()
+    with open(fragment_path, "rb") as fh:
+        frag_bytes = fh.read()
+    return init_bytes + frag_bytes
+
+
 def extract_blind(
     input_path: str,
     wm_bit_profile: int,
     config: StardustConfig,
+    *,
+    stdin_bytes: bytes | None = None,
 ) -> str | None:
     """Blind watermark extraction.
 
     Decodes the first video frame (or the full image) to luma, wraps it as
     an identity-aligned input folder for the Stardust ``extract`` tool,
     and returns the decoded WM ID hex on success or ``None`` on failure.
+
+    When ``stdin_bytes`` is provided, ffmpeg/ffprobe read from stdin
+    (``pipe:0``) instead of the filesystem path. Callers supply a
+    pre-concatenated init+fragment byte blob via
+    :func:`read_segmented_init_plus_first_fragment` to blind-extract
+    from a segmented fMP4.
     """
     paths = config.paths
-    media = probe_media(input_path, paths)
+    media = probe_media(input_path, paths, stdin_bytes=stdin_bytes)
     width, height = media.width, media.height
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -244,13 +542,31 @@ def extract_blind(
         decode_cmd = [
             str(paths.ffmpeg),
             "-y", "-hide_banner", "-loglevel", "error",
-            "-i", input_path,
+        ]
+        if stdin_bytes is not None:
+            decode_cmd += ["-i", "pipe:0"]
+        else:
+            decode_cmd += ["-i", input_path]
+        decode_cmd += [
             "-vframes", "1",
             "-pix_fmt", "yuv420p",
             "-f", "rawvideo",
             raw_yuv,
         ]
-        _run(decode_cmd)
+        # Run decode. When piping we need our own subprocess call so
+        # we can pass stdin=bytes.
+        if stdin_bytes is not None:
+            result = subprocess.run(
+                decode_cmd, input=stdin_bytes,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                err = result.stderr.decode("utf-8", "replace") if isinstance(result.stderr, bytes) else result.stderr
+                raise RuntimeError(
+                    f"ffmpeg decode failed (stdin mode): {err}"
+                )
+        else:
+            _run(decode_cmd)
 
         luma_size = width * height
         aligned_file = os.path.join(aligned_dir, f"aligned_0__{width}xx{height}.yuv")

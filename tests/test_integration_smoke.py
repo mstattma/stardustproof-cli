@@ -189,3 +189,114 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
     assert manifest_path.exists()
     _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
     print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
+
+
+@pytest.mark.integration
+def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
+    """End-to-end sign+verify for a single-file fragmented MP4.
+
+    The bbb-fragmented-single.mp4 fixture is a fragmented MP4 (moov +
+    9 moof/mdat pairs, 4-second fragments). Signing should:
+      1. Classify input as SingleFileFragmented.
+      2. Watermark the elementary stream via sffwembedsafe.
+      3. Re-fragment the output at keyframe boundaries derived from
+         the input's fragment schedule.
+      4. Emit a detached manifest that verifies cleanly via c2patool
+         (single-file fMP4 is handled internally by verify_stream_hash
+         with no fragments_glob).
+    """
+    start = time.perf_counter()
+    keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+
+    input_path = FIXTURES_DIR / "bbb-fragmented-single.mp4"
+    output_path = tmp_path / "signed.mp4"
+    manifest_store = tmp_path / "manifest-store"
+    args = _build_sign_args(
+        input_path=input_path,
+        output_path=output_path,
+        manifest_store=manifest_store,
+        org_uuid=org_uuid,
+        keystore_url=keystore_url,
+        access_token=access_token,
+        bin_dir=bin_dir,
+        wm_payload_hex=SMOKE_WM_HEX,
+    )
+
+    print(f"[smoke] single-file fragmented fixture: {input_path}", flush=True)
+
+    rc = cmd_sign(args)
+
+    assert rc == 0
+    assert output_path.exists()
+    # Output must still be a fragmented MP4.
+    from stardustproof_cli.media_input import (
+        SingleFileFragmented,
+        resolve_media_input,
+    )
+    assert isinstance(resolve_media_input(output_path), SingleFileFragmented)
+    manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
+    assert manifest_path.exists()
+    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    print(
+        f"[smoke] single-file fragmented smoke completed in "
+        f"{time.perf_counter() - start:.2f}s",
+        flush=True,
+    )
+
+
+@pytest.mark.integration
+def test_sign_segmented_rejected_with_clear_error(tmp_path: Path):
+    """Signing a segmented directory must be refused cleanly."""
+
+    import argparse
+
+    keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+    input_path = FIXTURES_DIR / "bbb-segmented"
+    args = _build_sign_args(
+        input_path=input_path,
+        output_path=tmp_path / "signed-seg",
+        manifest_store=tmp_path / "ms",
+        org_uuid=org_uuid,
+        keystore_url=keystore_url,
+        access_token=access_token,
+        bin_dir=bin_dir,
+        wm_payload_hex=SMOKE_WM_HEX,
+    )
+
+    with pytest.raises(RuntimeError, match="segmented fragmented-MP4"):
+        cmd_sign(args)
+
+
+@pytest.mark.integration
+def test_verify_segmented_pre_watermark_exits_2(tmp_path: Path):
+    """Verify against a pre-watermark segmented fixture: the blind-extract
+    must return None and the CLI must exit 2 without crashing.
+
+    This exercises the Segmented verify dispatch: the init + first
+    fragment are piped into ffmpeg for blind extraction, and the
+    resolver finds the init + fragment set.
+    """
+
+    # The real verify shell-out path is exercised by verify_asset().
+    from stardustproof_cli.config import StardustConfig, StardustPaths
+    from stardustproof_cli import verify as verify_mod
+
+    _, _, _, bin_dir = _smoke_env()
+    config = StardustConfig(paths=StardustPaths(custom_bin_dir=Path(bin_dir).resolve()).resolve())
+    store = tmp_path / "empty-store"
+    store.mkdir()
+    result = verify_mod.verify_asset(
+        input_path=FIXTURES_DIR / "bbb-segmented",
+        manifest_store=store,
+        config=config,
+        wm_bit_profile=48,
+        check_trust=False,
+    )
+    assert result.exit_code == 2, (
+        f"expected exit 2 (no WM), got {result.exit_code}: {result.error}"
+    )
+    print(
+        f"[smoke] segmented-verify pre-watermark exit 2 OK "
+        f"(blind={result.timings.get('blind_extract_s', 0):.2f}s)",
+        flush=True,
+    )

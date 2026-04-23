@@ -21,11 +21,13 @@ Narrow pragmatic profile:
 
 - decoders:   h264, hevc, aac, mjpeg, png, rawvideo
 - encoders:   libx264, aac, mjpeg, png, rawvideo
-- demuxers:   mov, matroska, image2, mjpeg, rawvideo, image_jpeg_pipe,
-              image_png_pipe
-- muxers:     mov, mp4, image2, mjpeg, rawvideo
+- demuxers:   mov, mp4, matroska, image2, mjpeg, rawvideo,
+              image_jpeg_pipe, image_png_pipe, hls, dash
+- muxers:     mov, mp4, image2, mjpeg, rawvideo, dash, hls, segment,
+              stream_segment, webm_dash_manifest
 - filters:    sffwembedsafe, scale, format, null, copy, fps, aformat, anull
 - parsers:    h264, aac, mjpeg, png
+- bitstream:  h264_mp4toannexb, dump_extra
 - protocols:  file, pipe
 
 Rebuild via:

@@ -364,3 +364,141 @@ def test_cmd_verify_exit_code_surfaces_to_caller(monkeypatch, asset_and_store):
 
     assert rc == 2
     assert "FAIL (exit 2)" in out
+
+
+# ---- Fragmented-input dispatch -------------------------------------------
+
+
+def _make_fake_bmff_dir(tmp_path: Path) -> Path:
+    """Build a tiny synthetic segmented fMP4 directory (init + 2 fragments)
+    that survives :func:`resolve_media_input` classification."""
+
+    def _box(t: bytes, body: bytes = b"") -> bytes:
+        return (8 + len(body)).to_bytes(4, "big") + t + body
+
+    def _moof() -> bytes:
+        mfhd = _box(b"mfhd", b"\x00\x00\x00\x00" + (1).to_bytes(4, "big"))
+        trun = _box(b"trun", b"\x01\x00\x00\x00" + (3).to_bytes(4, "big"))
+        traf = _box(b"traf", trun)
+        return _box(b"moof", mfhd + traf)
+
+    def _mdat(size: int = 24) -> bytes:
+        return _box(b"mdat", b"\x00" * max(0, size - 8))
+
+    ftyp = _box(b"ftyp", b"isom\x00\x00\x00\x00isom")
+    moov = _box(b"moov", b"\x00" * 24)
+
+    seg_dir = tmp_path / "bmff_dir"
+    seg_dir.mkdir()
+    (seg_dir / "init.m4s").write_bytes(ftyp + moov)
+    (seg_dir / "seg-0001.m4s").write_bytes(ftyp + _moof() + _mdat())
+    (seg_dir / "seg-0002.m4s").write_bytes(ftyp + _moof() + _mdat())
+    return seg_dir
+
+
+def test_verify_asset_segmented_dispatch(monkeypatch, stub_config, tmp_path):
+    """verify_asset against a segmented input blind-extracts via piped
+    init+fragment bytes and invokes c2patool with fragments_glob."""
+
+    seg_dir = _make_fake_bmff_dir(tmp_path)
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+
+    # Capture the exact extract_blind kwargs so we can assert the
+    # piped-stdin dispatch is taken.
+    extract_calls = []
+
+    def _fake_extract(*args, **kwargs):
+        extract_calls.append(kwargs)
+        return SMOKE_WM_HEX
+
+    monkeypatch.setattr(stardust, "extract_blind", _fake_extract)
+
+    # Capture c2patool argv so we can assert fragments_glob made it through.
+    import stardustproof_c2pa_signer.c2patool as c2patool_mod
+    verify_calls = []
+
+    def _fake_verify(**kwargs):
+        verify_calls.append(kwargs)
+        return _fake_c2patool_result(_good_report(SMOKE_WM_HEX))
+
+    monkeypatch.setattr(c2patool_mod, "verify_detached_manifest", _fake_verify)
+    monkeypatch.setattr(
+        c2patool_mod,
+        "write_cawg_trust_settings",
+        lambda target_path, **kw: Path(target_path).write_text("# stub\n") or Path(target_path),
+    )
+
+    result = verify_mod.verify_asset(
+        input_path=seg_dir, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    assert result.ok is True, result.error
+    assert result.exit_code == 0
+
+    # Extract was called with stdin_bytes (piped init+fragment).
+    assert len(extract_calls) == 1
+    assert "stdin_bytes" in extract_calls[0]
+    assert isinstance(extract_calls[0]["stdin_bytes"], bytes)
+    assert len(extract_calls[0]["stdin_bytes"]) > 0
+
+    # c2patool was invoked with the init segment as asset and a
+    # fragments_glob that matches the seg-*.m4s pattern.
+    assert len(verify_calls) == 1
+    call = verify_calls[0]
+    assert Path(call["asset_path"]).name == "init.m4s"
+    assert call.get("fragments_glob") is not None
+    glob_str = str(call["fragments_glob"])
+    assert "seg-" in glob_str
+
+
+def test_verify_asset_single_file_fragmented_dispatch(monkeypatch, stub_config, tmp_path):
+    """SingleFileFragmented verify passes the file itself to c2patool with
+    no fragments_glob (c2patool handles single-file fMP4 internally via
+    verify_stream_hash)."""
+
+    # Build a single-file fragmented MP4 synthetic fixture.
+    def _box(t: bytes, body: bytes = b"") -> bytes:
+        return (8 + len(body)).to_bytes(4, "big") + t + body
+
+    def _moof() -> bytes:
+        mfhd = _box(b"mfhd", b"\x00\x00\x00\x00" + (1).to_bytes(4, "big"))
+        trun = _box(b"trun", b"\x01\x00\x00\x00" + (3).to_bytes(4, "big"))
+        traf = _box(b"traf", trun)
+        return _box(b"moof", mfhd + traf)
+
+    def _mdat() -> bytes:
+        return _box(b"mdat", b"\x00" * 16)
+
+    ftyp = _box(b"ftyp", b"isom\x00\x00\x00\x00isom")
+    moov = _box(b"moov", b"\x00" * 24)
+    frag_file = tmp_path / "frag.mp4"
+    frag_file.write_bytes(ftyp + moov + _moof() + _mdat())
+
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+
+    monkeypatch.setattr(stardust, "extract_blind", lambda *a, **kw: SMOKE_WM_HEX)
+    import stardustproof_c2pa_signer.c2patool as c2patool_mod
+    verify_calls = []
+    monkeypatch.setattr(
+        c2patool_mod, "verify_detached_manifest",
+        lambda **kwargs: verify_calls.append(kwargs) or _fake_c2patool_result(_good_report(SMOKE_WM_HEX)),
+    )
+    monkeypatch.setattr(
+        c2patool_mod, "write_cawg_trust_settings",
+        lambda target_path, **kw: Path(target_path).write_text("# stub\n") or Path(target_path),
+    )
+
+    result = verify_mod.verify_asset(
+        input_path=frag_file, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    assert result.ok is True, result.error
+
+    assert len(verify_calls) == 1
+    call = verify_calls[0]
+    assert Path(call["asset_path"]).name == "frag.mp4"
+    assert call.get("fragments_glob") is None

@@ -37,6 +37,14 @@ from typing import Any, Optional
 
 from stardustproof_cli import stardust
 from stardustproof_cli.config import StardustConfig
+from stardustproof_cli.media_input import (
+    MediaInput,
+    MediaInputError,
+    Segmented,
+    SingleFile,
+    SingleFileFragmented,
+    resolve_media_input,
+)
 
 
 WATERMARK_ALG = "castlabs.stardust"
@@ -147,6 +155,50 @@ def _write_trust_bundle(
     return _concat_pem_bundle(pem_paths, tmp_dir / name)
 
 
+def _derive_fragments_glob(segmented: Segmented) -> Path:
+    """Derive a filename glob pattern that matches every media fragment
+    in ``segmented`` but excludes the init segment.
+
+    c2patool's ``--fragments_glob`` is a filename pattern (not a full
+    path) rooted at the asset's directory. Per c2patool:
+
+        "The fragments_glob pattern should only match fragment file
+         names not the full paths"
+
+    We pick the longest common prefix + ``*`` + longest common suffix
+    of the fragment basenames. This works for every packager naming
+    convention we have seen (``seg_NNNN.m4s``, ``chunk-XXXXX.m4s``,
+    ``segment_N.cmfv``, …). Falls back to ``*`` if the fragments
+    share no useful prefix/suffix.
+    """
+
+    names = [p.name for p in segmented.fragments]
+    if not names:
+        return Path("*")
+
+    prefix = os.path.commonprefix(names)
+    reversed_names = [n[::-1] for n in names]
+    suffix = os.path.commonprefix(reversed_names)[::-1]
+
+    # If prefix+suffix already cover the entire name of a fragment we
+    # would emit a non-glob literal that matches only one file; in
+    # that case fall through to plain ``*``.
+    if any(prefix + suffix == n for n in names):
+        return Path("*")
+
+    pattern = f"{prefix}*{suffix}"
+    # Sanity check: pattern must not match the init segment.
+    from fnmatch import fnmatch as _fnmatch
+    if _fnmatch(segmented.init.name, pattern):
+        # Fall back to a stricter pattern anchored on a shared
+        # fragment-suffix-only match, or "*" if even that catches init.
+        if suffix and not _fnmatch(segmented.init.name, f"*{suffix}"):
+            pattern = f"*{suffix}"
+        else:
+            pattern = "*"
+    return Path(pattern)
+
+
 def verify_asset(
     input_path: Path | str,
     manifest_store: Path | str,
@@ -188,7 +240,7 @@ def verify_asset(
     input_path = Path(input_path)
     manifest_store = Path(manifest_store)
 
-    if not input_path.is_file():
+    if not input_path.exists():
         return VerifyResult(
             ok=False, exit_code=1,
             error=f"Input asset not found: {input_path}",
@@ -198,6 +250,15 @@ def verify_asset(
         return VerifyResult(
             ok=False, exit_code=1,
             error=f"Manifest store is not a directory: {manifest_store}",
+            timings=timings,
+        )
+
+    try:
+        media = resolve_media_input(input_path)
+    except MediaInputError as exc:
+        return VerifyResult(
+            ok=False, exit_code=1,
+            error=f"Unable to classify input: {exc}",
             timings=timings,
         )
 
@@ -248,11 +309,31 @@ def verify_asset(
                 )
 
     # Step 1: blind-extract the watermark id.
+    #
+    # Dispatch depends on the media-input shape:
+    #   SingleFile / SingleFileFragmented -> decode from the file directly
+    #   Segmented                         -> concatenate init + fragments[0]
+    #                                        in memory and pipe to ffmpeg
     step_start = time.perf_counter()
     try:
-        wm_id_hex = stardust.extract_blind(
-            str(input_path), wm_bit_profile=wm_bit_profile, config=config
-        )
+        if isinstance(media, Segmented):
+            stdin_bytes = stardust.read_segmented_init_plus_first_fragment(
+                str(media.init), str(media.fragments[0]),
+            )
+            # extract_blind's `input_path` is used only for diagnostics
+            # in stdin mode.
+            wm_id_hex = stardust.extract_blind(
+                str(media.init),
+                wm_bit_profile=wm_bit_profile,
+                config=config,
+                stdin_bytes=stdin_bytes,
+            )
+        else:
+            wm_id_hex = stardust.extract_blind(
+                str(input_path),
+                wm_bit_profile=wm_bit_profile,
+                config=config,
+            )
     except Exception as exc:
         timings["blind_extract_s"] = time.perf_counter() - step_start
         timings["total_s"] = time.perf_counter() - t0
@@ -312,6 +393,22 @@ def verify_asset(
         )
 
     step_start = time.perf_counter()
+    # Compute c2patool args that depend on media shape. For segmented
+    # inputs we pass the init segment as the positional asset and the
+    # fragment file set via --fragments_glob. For SingleFile and
+    # SingleFileFragmented we pass the file itself; c2patool's
+    # verify_stream_hash handles single-file fragmented MP4 internally.
+    if isinstance(media, Segmented):
+        c2patool_asset = media.init
+        # c2patool expects the glob pattern relative to the init's
+        # directory (see its --fragments_glob docs). Derive a pattern
+        # that matches every fragment in the set while excluding the
+        # init itself. We use a conservative glob based on the
+        # resolver's sorted filename list.
+        c2patool_fragments_glob: Optional[Path] = _derive_fragments_glob(media)
+    else:
+        c2patool_asset = input_path
+        c2patool_fragments_glob = None
     with tempfile.TemporaryDirectory(prefix="stardustproof-verify-") as tmp:
         tmp_dir = Path(tmp)
 
@@ -335,16 +432,18 @@ def verify_asset(
                 trust_anchors_pem=cawg_bundle.read_text(),
             )
             result = verify_detached_manifest(
-                asset_path=input_path,
+                asset_path=c2patool_asset,
                 manifest_path=manifest_path,
                 trust_anchors=trust_bundle,
                 settings_path=settings_path,
+                fragments_glob=c2patool_fragments_glob,
                 detailed=True,
             )
         else:
             result = verify_detached_manifest(
-                asset_path=input_path,
+                asset_path=c2patool_asset,
                 manifest_path=manifest_path,
+                fragments_glob=c2patool_fragments_glob,
                 detailed=True,
             )
     timings["c2patool_s"] = time.perf_counter() - step_start

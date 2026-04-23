@@ -113,6 +113,32 @@ stardustproof sign \
 The default video encode is `libx264 -preset veryfast -crf 18`.  Presets
 faster than `veryfast` (notably `ultrafast`) break blind extraction.
 
+### Fragmented MP4
+
+`sign` accepts a **single-file fragmented MP4** as input (BMFF file with
+`moov` plus one or more `moof`/`mdat` pairs, e.g. CMAF non-segmented).
+The output is a single-file fragmented MP4 whose fragment boundaries are
+preserved by passing `-force_key_frames` to the underlying ffmpeg encode
+derived from the input's per-`moof` schedule.
+
+```bash
+stardustproof sign \
+  --input clip-fragmented.mp4 \
+  --output signed-fragmented.mp4 \
+  --wm-payload-hex 001122334455 \
+  --wm-bit-profile 48 \
+  --manifest-store ./manifest-store \
+  --org-uuid <org-uuid> \
+  --keystore-url http://localhost:2001 \
+  --signing-access-token <token>
+```
+
+Segmented fragmented-MP4 (separate init + per-segment files on disk) is
+**not** supported for `sign` in this release — `sign` refuses with a
+clear error. The recommended workflow for segmented delivery is: sign
+the unfragmented mezzanine first, then package the signed output for
+DASH/HLS.
+
 ### Notes
 
 The embed pipeline runs as a single FFmpeg invocation:
@@ -132,15 +158,25 @@ stardustproof verify \
   --manifest-store ./manifest-store
 ```
 
+`--input` accepts three media-input shapes, auto-detected by walking
+the top-level BMFF box structure:
+
+| Shape | Example | Handling |
+|---|---|---|
+| Ordinary file | `.jpg`, `.mov`, non-fragmented `.mp4` | Passed as-is to blind-extract and `c2patool --external-manifest <c2pa>`. |
+| Single-file fragmented MP4 | fragmented `.mp4` / `.cmfv` (has both `moov` and `moof` boxes) | Same code path as ordinary file; c2pa-rs handles fragmented-MP4 hashing internally via `verify_stream_hash`. |
+| Segmented fMP4 directory | Directory with one init segment (BMFF with `moov` and no `moof`) plus media fragments (BMFF with `moof` and no `moov`) | Blind-extract runs ffmpeg with init + fragment[0] piped to stdin; `c2patool` is invoked with `fragment --fragments_glob <derived>` and the init as the positional asset. Classification is structural — filename conventions like `init.m4s` / `seg_*.m4s` are not required. |
+
 The verify command:
 
-1. blind-extracts the Stardust watermark id from the asset,
-2. looks up the matching `.c2pa` manifest in the directory store,
-3. invokes the bundled `c2patool` to validate the detached manifest
+1. classifies the input into one of the three shapes above,
+2. blind-extracts the Stardust watermark id from the asset,
+3. looks up the matching `.c2pa` manifest in the directory store,
+4. invokes the bundled `c2patool` to validate the detached manifest
    against the asset,
-4. asserts that the manifest's `c2pa.soft-binding` (alg
+5. asserts that the manifest's `c2pa.soft-binding` (alg
    `castlabs.stardust`) value equals the extracted watermark id,
-5. asserts that `c2patool` reports zero validation failures.
+6. asserts that `c2patool` reports zero validation failures.
 
 By default, trust anchors are auto-discovered from the signer package's
 `keystore/certs/{castlabs_c2pa_ca,trusted_publisher_ca}.cert.pem`. Pass

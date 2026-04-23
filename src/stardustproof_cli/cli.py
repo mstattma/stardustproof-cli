@@ -10,6 +10,14 @@ from stardustproof_cli.config import StardustConfig, StardustPaths
 from stardustproof_cli.manifest_store import DirectoryManifestStore
 from stardustproof_cli import stardust
 from stardustproof_cli import verify as verify_mod
+from stardustproof_cli.media_input import (
+    MediaInputError,
+    Segmented,
+    SingleFile,
+    SingleFileFragmented,
+    parse_fragment_schedule,
+    resolve_media_input,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -190,20 +198,54 @@ def cmd_sign(args: argparse.Namespace) -> int:
         )
     print(f"[cli] Binary checks: {time.perf_counter() - step_start:.2f}s", flush=True)
 
+    # Resolve the input shape so we can dispatch to the right embed path.
+    try:
+        media_input = resolve_media_input(Path(args.input))
+    except MediaInputError as exc:
+        raise RuntimeError(f"Unable to classify input: {exc}") from exc
+
+    if isinstance(media_input, Segmented):
+        raise RuntimeError(
+            "Signing a segmented fragmented-MP4 directory is not supported "
+            "in this release. Concatenate the segments into a single-file "
+            "fragmented MP4 first, or sign the unfragmented mezzanine and "
+            "re-fragment the signed output."
+        )
+
     step_start = time.perf_counter()
-    media = stardust.probe_media(args.input, config.paths)
+    if isinstance(media_input, SingleFileFragmented):
+        media = stardust.probe_media(args.input, config.paths)
+    else:
+        media = stardust.probe_media(args.input, config.paths)
     print(f"[cli] Media detected: {media.media_kind} {media.width}x{media.height}", flush=True)
+    if isinstance(media_input, SingleFileFragmented):
+        print(
+            f"[cli] Input shape: single-file fragmented MP4",
+            flush=True,
+        )
     media_probe_s = time.perf_counter() - step_start
 
     step_start = time.perf_counter()
-    stardust.embed(
-        args.input,
-        args.output,
-        args.wm_payload_hex.lower(),
-        config,
-        video_preset=args.video_preset,
-        video_crf=args.video_crf,
-    )
+    if isinstance(media_input, SingleFileFragmented):
+        schedule = parse_fragment_schedule(Path(args.input))
+        stardust.embed_single_file_fragmented(
+            args.input,
+            args.output,
+            args.wm_payload_hex.lower(),
+            config,
+            fragment_schedule=schedule,
+            video_preset=args.video_preset,
+            video_crf=args.video_crf,
+        )
+    else:
+        stardust.embed(
+            args.input,
+            args.output,
+            args.wm_payload_hex.lower(),
+            config,
+            video_preset=args.video_preset,
+            video_crf=args.video_crf,
+        )
     embed_s = time.perf_counter() - step_start
     print(f"[cli] Watermark embed: {embed_s:.2f}s", flush=True)
 
