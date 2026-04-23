@@ -31,4 +31,5 @@ packages = ["src/stardustproof_cli"]
 [tool.pytest.ini_options]
 markers = [
     "integration: end-to-end smoke tests that require external services and binaries",
+    "slow: tests that run for tens of seconds or more (opt-in long-video scale)",
 ]
