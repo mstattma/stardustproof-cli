@@ -113,7 +113,26 @@ signer's DynamicAssertion callback raises; c2pa-rs's FFI boundary
 swallows the actual HTTP error and surfaces it only as
 `bad parameter: DynamicAssertion callback returned an error`.
 
-To start the keystore correctly:
+To start the keystore correctly (recommended — uses the canonical
+start script from the keystore repo, handles daemonization, port
+conflict detection, health-probing, and token plumbing):
+
+```bash
+# From the CLI repo root. The shim forwards into
+# $STARDUSTPROOF_KEYSTORE_REPO/scripts/start-dev-keystore.sh
+# (default: ../stardustproof-keystore).
+scripts/start-dev-keystore.sh            # --start
+scripts/start-dev-keystore.sh --status
+scripts/start-dev-keystore.sh --stop
+scripts/start-dev-keystore.sh --restart
+```
+
+The token value defaults to `dev-access-token-smoke` inside the
+keystore script; it must match `STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN`
+in `.env.smoke.local`.
+
+Manual invocation (still supported when the keystore repo is not
+checked out side-by-side):
 
 ```bash
 cd stardustproof-keystore
@@ -122,12 +141,10 @@ KEYSTORE_DEV_SIGNING_ACCESS_TOKEN=dev-access-token-smoke \
   --host 127.0.0.1 --port 2001
 ```
 
-The token value must match `STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN`
-in `.env.smoke.local`.
-
-On WSL, backgrounding uvicorn cleanly requires careful nohup/disown
-or a wrapped systemd unit — an agent that restarts the keystore
-should verify the process is still live after ~5 seconds via
+On WSL, backgrounding uvicorn by hand requires careful nohup/disown
+or a wrapped systemd unit — the start script takes care of this with
+`nohup setsid`. If you restart the keystore manually, verify the
+process is live after ~5 seconds via
 `curl -sf http://localhost:2001/health`.
 
 ### Run the smoke
