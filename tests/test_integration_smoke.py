@@ -28,6 +28,14 @@ def _smoke_env() -> tuple[str, str, str, str]:
 
     if not all([keystore_url, org_uuid, access_token, bin_dir]):
         pytest.skip("Set STARDUSTPROOF_TEST_KEYSTORE_URL, STARDUSTPROOF_TEST_ORG_UUID, STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN, and STARDUSTPROOF_TEST_BIN_DIR")
+
+    # Ensure the signer's video-thumbnail path uses our bundled ffmpeg
+    # (which is the one we control the feature-profile of). Falls back
+    # to the signer's PATH-based discovery when unset.
+    if not os.environ.get("STARDUSTPROOF_FFMPEG"):
+        bundled_ffmpeg = Path(bin_dir) / "ffmpeg" / "bin" / "ffmpeg"
+        if bundled_ffmpeg.is_file():
+            os.environ["STARDUSTPROOF_FFMPEG"] = str(bundled_ffmpeg.resolve())
     return keystore_url, org_uuid, access_token, bin_dir
 
 
@@ -41,6 +49,7 @@ def _build_sign_args(
     access_token: str,
     bin_dir: str,
     wm_payload_hex: str,
+    thumbnail: bool = True,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         command="sign",
@@ -56,7 +65,7 @@ def _build_sign_args(
         claim_generator_name="STARDUSTproof CLI Test",
         claim_generator_version="1.0",
         overwrite_manifest=False,
-        thumbnail=False,
+        thumbnail=thumbnail,
         bin_dir=bin_dir,
         video_preset="veryfast",
         video_crf=18,
@@ -78,7 +87,7 @@ def _verify_via_cli(
     manifest_store: Path,
     wm_payload_hex: str,
     bin_dir: str,
-) -> None:
+):
     """Run the productized verify pipeline against a freshly-signed asset
     and assert every exit-code branch stays green.
 
@@ -127,6 +136,74 @@ def _verify_via_cli(
         f"total={result.timings.get('total_s', 0):.2f}s",
         flush=True,
     )
+    return result
+
+
+def _assert_manifest_has_thumbnail(verify_result, *, expected_mime_prefix: str = "image/") -> None:
+    """Walk the c2patool --detailed report to confirm that the signed
+    manifest carries a ``c2pa.thumbnail.claim`` resource.
+
+    c2patool places thumbnails under the active manifest's ``thumbnail``
+    key (normalized legacy shape) and/or in the ``assertion_store``
+    under ``c2pa.thumbnail.claim.<ext>`` (c2pa-rs 0.78+). We tolerate
+    both shapes so the smoke keeps working across c2patool versions.
+    """
+    report = verify_result.report
+    assert isinstance(report, dict), "verify result missing c2patool report"
+    container = report.get("manifest_store", report)
+    manifests = container.get("manifests")
+    assert isinstance(manifests, dict) and manifests, (
+        "c2patool report has no manifests"
+    )
+    active = (
+        container.get("active_manifest")
+        or container.get("activeManifest")
+        or next(iter(manifests))
+    )
+    manifest = manifests[active]
+    assert isinstance(manifest, dict)
+
+    found_label = None
+    found_mime = None
+
+    # Shape 1: modern assertion_store keyed by label.
+    assertion_store = manifest.get("assertion_store")
+    if isinstance(assertion_store, dict):
+        for key in assertion_store:
+            if isinstance(key, str) and key.startswith("c2pa.thumbnail.claim"):
+                found_label = key
+                break
+
+    # Shape 2: top-level thumbnail object.
+    thumb = manifest.get("thumbnail")
+    if thumb and isinstance(thumb, dict):
+        mime = thumb.get("format") or thumb.get("mime_type")
+        if isinstance(mime, str):
+            found_mime = mime
+        if found_label is None:
+            found_label = "thumbnail"
+
+    # Shape 3: legacy assertions list.
+    assertions = manifest.get("assertions")
+    if found_label is None and isinstance(assertions, list):
+        for entry in assertions:
+            if not isinstance(entry, dict):
+                continue
+            label = entry.get("label", "")
+            if isinstance(label, str) and label.startswith("c2pa.thumbnail.claim"):
+                found_label = label
+                break
+
+    assert found_label is not None, (
+        f"no c2pa.thumbnail.claim found in signed manifest "
+        f"(assertion_store keys: {list(assertion_store.keys()) if isinstance(assertion_store, dict) else 'n/a'})"
+    )
+    if found_mime:
+        assert found_mime.startswith(expected_mime_prefix), (
+            f"thumbnail mime {found_mime!r} does not start with "
+            f"{expected_mime_prefix!r}"
+        )
+    print(f"[smoke] thumbnail assertion OK: label={found_label} mime={found_mime}", flush=True)
 
 
 @pytest.mark.integration
@@ -157,7 +234,8 @@ def test_sign_image_smoke_with_real_keystore(tmp_path: Path):
     assert output_path.exists()
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
-    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
     print(f"[smoke] image smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
@@ -189,7 +267,8 @@ def test_sign_video_smoke_with_real_keystore(tmp_path: Path):
     assert output_path.exists()
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
-    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
     print(f"[smoke] video smoke completed in {time.perf_counter() - start:.2f}s", flush=True)
 
 
@@ -238,7 +317,8 @@ def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
     assert isinstance(resolve_media_input(output_path), SingleFileFragmented)
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
-    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
     print(
         f"[smoke] single-file fragmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
@@ -296,9 +376,110 @@ def test_sign_segmented_smoke_with_real_keystore(tmp_path: Path):
 
     manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
     assert manifest_path.exists()
-    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    result = _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
     print(
         f"[smoke] segmented smoke completed in "
+        f"{time.perf_counter() - start:.2f}s",
+        flush=True,
+    )
+
+
+@pytest.mark.integration
+def test_sign_segmented_in_place_smoke_with_real_keystore(tmp_path: Path):
+    """Segmented sign with --in-place atomically replaces the input tree.
+
+    Copies the bbb-segmented fixture into a scratch directory so we do
+    NOT clobber the committed repo fixture, then runs sign with
+    --in-place pointing --output at the same directory. Verifies that:
+      1. cmd_sign returns 0.
+      2. The scratch directory contents were replaced (new init + new
+         fragments; file sizes differ from the original fixture since
+         the signed init carries the JUMBF manifest and each fragment
+         gets a merkle-placeholder uuid box).
+      3. Verify against the same directory exits 0 with soft-binding
+         matching and zero validation failures.
+    """
+    import shutil
+
+    start = time.perf_counter()
+    keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+
+    src_fixture = FIXTURES_DIR / "bbb-segmented"
+    work_dir = tmp_path / "in-place-seg"
+    shutil.copytree(src_fixture, work_dir)
+    # Drop the non-BMFF DASH manifest sidecar; it's not part of the
+    # Segmented contract and our resolver ignores it anyway.
+    (work_dir / "manifest.mpd").unlink(missing_ok=True)
+
+    # Record original sizes to confirm replacement happened.
+    pre_init_size = (work_dir / "init.m4s").stat().st_size
+    pre_frag_names = sorted(p.name for p in work_dir.glob("seg-*.m4s"))
+    pre_frag_sizes = {p.name: p.stat().st_size for p in work_dir.glob("seg-*.m4s")}
+
+    manifest_store = tmp_path / "manifest-store"
+    args = _build_sign_args(
+        input_path=work_dir,
+        output_path=work_dir,
+        manifest_store=manifest_store,
+        org_uuid=org_uuid,
+        keystore_url=keystore_url,
+        access_token=access_token,
+        bin_dir=bin_dir,
+        wm_payload_hex=SMOKE_WM_HEX,
+    )
+    args.in_place = True
+
+    print(
+        f"[smoke] in-place segmented fixture copy: {work_dir}",
+        flush=True,
+    )
+
+    rc = cmd_sign(args)
+    assert rc == 0
+
+    # Work dir must still classify as Segmented and have the same
+    # fragment *names* (in-place replacement preserves names; we do
+    # not require sample-accurate preservation since the encoder is
+    # free to pick keyframe positions within the boundaries we force).
+    from stardustproof_c2pa_signer import Segmented, resolve_media_input
+    resolved = resolve_media_input(work_dir)
+    assert isinstance(resolved, Segmented)
+    post_frag_names = sorted(p.name for p in work_dir.glob("seg-*.m4s"))
+    assert post_frag_names == pre_frag_names, (
+        f"expected fragment filenames preserved by in-place swap: "
+        f"pre={pre_frag_names} post={post_frag_names}"
+    )
+
+    # Signed init carries the JUMBF manifest, so size MUST differ.
+    post_init_size = (work_dir / "init.m4s").stat().st_size
+    assert post_init_size != pre_init_size, (
+        f"expected init.m4s size to change after sign, but both are {pre_init_size}"
+    )
+    # At least one fragment size changes too (merkle-placeholder uuid
+    # box insertion plus watermarked elementary stream).
+    changed = [
+        name for name, sz in pre_frag_sizes.items()
+        if (work_dir / name).stat().st_size != sz
+    ]
+    assert changed, (
+        "expected at least one fragment to change size after in-place sign"
+    )
+
+    manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
+    assert manifest_path.exists()
+    result = _verify_via_cli(work_dir, manifest_store, SMOKE_WM_HEX, bin_dir)
+    _assert_manifest_has_thumbnail(result, expected_mime_prefix="image/")
+
+    # Confirm the committed repo fixture was NOT touched.
+    assert (src_fixture / "init.m4s").exists()
+    assert (src_fixture / "init.m4s").stat().st_size == pre_init_size, (
+        "committed bbb-segmented fixture was modified -- in-place test "
+        "leaked into the repo tree!"
+    )
+
+    print(
+        f"[smoke] in-place segmented smoke completed in "
         f"{time.perf_counter() - start:.2f}s",
         flush=True,
     )
