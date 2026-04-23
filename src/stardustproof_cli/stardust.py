@@ -463,20 +463,20 @@ def embed_segmented(
 
         # Stream init+fragments bytes to ffmpeg stdin.
         step_start = time.perf_counter()
+        # Concatenate init + all fragments in-memory then hand to
+        # communicate(). For the currently-in-scope fixtures (<1GB)
+        # this is simpler and avoids the flush-of-closed-fd pitfall
+        # that the manual Popen.write/close pattern triggers on
+        # Python 3.12 when combined with communicate().
+        with open(init_path, "rb") as fh:
+            piped_data = bytearray(fh.read())
+        for frag_path in fragment_paths:
+            with open(frag_path, "rb") as fh:
+                piped_data.extend(fh.read())
+
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            with open(init_path, "rb") as fh:
-                proc.stdin.write(fh.read())
-            for frag_path in fragment_paths:
-                with open(frag_path, "rb") as fh:
-                    # stream in chunks to avoid huge-allocation spikes
-                    while True:
-                        chunk = fh.read(1 << 20)
-                        if not chunk:
-                            break
-                        proc.stdin.write(chunk)
-            proc.stdin.close()
-            stdout, stderr = proc.communicate(timeout=600)
+            stdout, stderr = proc.communicate(input=bytes(piped_data), timeout=600)
         except Exception:
             proc.kill()
             raise

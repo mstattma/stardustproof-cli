@@ -60,6 +60,8 @@ def _build_sign_args(
         bin_dir=bin_dir,
         video_preset="veryfast",
         video_crf=18,
+        in_place=False,
+        force=False,
         strength=None,
         sp_width=None,
         sp_height=None,
@@ -245,17 +247,33 @@ def test_sign_single_file_fragmented_smoke_with_real_keystore(tmp_path: Path):
 
 
 @pytest.mark.integration
-def test_sign_segmented_rejected_with_clear_error(tmp_path: Path):
-    """Signing a segmented directory must be refused cleanly."""
+def test_sign_segmented_smoke_with_real_keystore(tmp_path: Path):
+    """End-to-end sign+verify for a segmented fragmented-MP4 directory.
 
-    import argparse
-
+    The bbb-segmented fixture is an 8-segment DASH tree (init.m4s +
+    seg-NNNN.m4s). Signing should:
+      1. Classify input as Segmented.
+      2. Watermark each media segment via the sffwembedsafe-enabled
+         DASH pipeline in stardust.embed_segmented (scratch dir).
+      3. Sign via Builder.sign_fragmented, embedding the manifest into
+         the new init segment and inserting merkle-placeholder boxes
+         into each fragment.
+      4. Emit a flat output directory (--output) with init.m4s +
+         seg-NNNN.m4s.
+      5. The detached manifest in the store verifies cleanly against
+         the signed output directory via c2patool's fragment
+         --fragments_glob path.
+    """
+    start = time.perf_counter()
     keystore_url, org_uuid, access_token, bin_dir = _smoke_env()
+
     input_path = FIXTURES_DIR / "bbb-segmented"
+    output_path = tmp_path / "signed-seg"
+    manifest_store = tmp_path / "manifest-store"
     args = _build_sign_args(
         input_path=input_path,
-        output_path=tmp_path / "signed-seg",
-        manifest_store=tmp_path / "ms",
+        output_path=output_path,
+        manifest_store=manifest_store,
         org_uuid=org_uuid,
         keystore_url=keystore_url,
         access_token=access_token,
@@ -263,8 +281,27 @@ def test_sign_segmented_rejected_with_clear_error(tmp_path: Path):
         wm_payload_hex=SMOKE_WM_HEX,
     )
 
-    with pytest.raises(RuntimeError, match="segmented fragmented-MP4"):
-        cmd_sign(args)
+    print(f"[smoke] segmented fixture: {input_path}", flush=True)
+
+    rc = cmd_sign(args)
+
+    assert rc == 0
+    # Output must exist as a flat directory of init + fragments.
+    assert output_path.is_dir(), f"expected {output_path} to be a directory"
+    from stardustproof_c2pa_signer import Segmented, resolve_media_input
+    resolved = resolve_media_input(output_path)
+    assert isinstance(resolved, Segmented)
+    # Input tree untouched.
+    assert (input_path / "init.m4s").exists()
+
+    manifest_path = manifest_store / f"{SMOKE_WM_HEX}.c2pa"
+    assert manifest_path.exists()
+    _verify_via_cli(output_path, manifest_store, SMOKE_WM_HEX, bin_dir)
+    print(
+        f"[smoke] segmented smoke completed in "
+        f"{time.perf_counter() - start:.2f}s",
+        flush=True,
+    )
 
 
 @pytest.mark.integration

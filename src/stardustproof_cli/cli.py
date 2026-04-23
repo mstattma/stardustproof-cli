@@ -53,6 +53,26 @@ def _parse_args() -> argparse.Namespace:
         default=18,
         help="libx264 CRF for video outputs (default: 18)",
     )
+    sign.add_argument(
+        "--in-place",
+        action="store_true",
+        help=(
+            "For Segmented input: atomically replace the input directory "
+            "contents with the signed output. --output must equal --input "
+            "(or be unset, in which case it defaults to --input). "
+            "Interrupted signs leave the input tree in a partially-"
+            "replaced state; prefer a separate --output for production."
+        ),
+    )
+    sign.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "For Segmented input with a non-empty --output directory: "
+            "overwrite existing files. Required (alongside --in-place, if "
+            "used) to proceed with a non-empty output directory."
+        ),
+    )
     sign.add_argument("--strength", type=int, default=None)
     sign.add_argument("--sp-width", type=int, default=None)
     sign.add_argument("--sp-height", type=int, default=None)
@@ -181,6 +201,43 @@ def _make_org_sign_handler(keystore, access_token: str):
     return _handler
 
 
+def _validate_segmented_output(
+    input_dir: Path, output_dir: Path, *, in_place: bool, force: bool
+) -> None:
+    """Enforce CLI invariants for Segmented-shape --output.
+
+    - With --in-place: --output must equal --input (or be omitted and
+      default to --input).
+    - Without --in-place: --output must differ from --input.
+    - In both cases a pre-existing non-empty output directory requires
+      --force.
+    """
+    input_dir = input_dir.resolve()
+    output_dir = output_dir.resolve()
+    if in_place:
+        if output_dir != input_dir:
+            raise RuntimeError(
+                f"--in-place requires --output == --input "
+                f"({input_dir} != {output_dir}); omit --output to default "
+                f"to --input, or drop --in-place."
+            )
+    else:
+        if output_dir == input_dir:
+            raise RuntimeError(
+                f"--output ({output_dir}) must not equal --input for "
+                f"Segmented inputs; pass --in-place if you intend to "
+                f"replace the input tree."
+            )
+    if output_dir.is_dir():
+        existing = [p for p in output_dir.iterdir() if not p.name.startswith(".")]
+        if existing and not force and not in_place:
+            names = ", ".join(sorted(p.name for p in existing[:5]))
+            raise RuntimeError(
+                f"--output directory {output_dir} is non-empty "
+                f"(found: {names}...); pass --force to overwrite."
+            )
+
+
 def cmd_sign(args: argparse.Namespace) -> int:
     from stardustproof_c2pa_signer import KeystoreClient, generate_and_embed_manifest_simple
 
@@ -198,28 +255,38 @@ def cmd_sign(args: argparse.Namespace) -> int:
         )
     print(f"[cli] Binary checks: {time.perf_counter() - step_start:.2f}s", flush=True)
 
-    # Resolve the input shape so we can dispatch to the right embed path.
-    # The signer's generate_and_embed_manifest_simple classifies the input
-    # the same way and will raise NotImplementedError for Segmented; we
-    # short-circuit here to give the user a friendlier message before
-    # spending time on the watermark step.
+    # Resolve the input shape so we can dispatch to the right watermark
+    # and sign path. The signer's generate_and_embed_manifest_simple
+    # classifies the input the same way; pre-classifying here also lets
+    # us apply per-shape CLI flag semantics (e.g. --in-place for
+    # Segmented).
     try:
         media_input = resolve_media_input(Path(args.input))
     except MediaInputError as exc:
         raise RuntimeError(f"Unable to classify input: {exc}") from exc
 
-    if isinstance(media_input, Segmented):
-        raise RuntimeError(
-            "Signing a segmented fragmented-MP4 directory is not supported "
-            "in this release. The underlying c2pa-python FFI does not yet "
-            "expose Builder.sign_fragmented_files; until it does, please "
-            "concatenate the segments into a single-file fragmented MP4 "
-            "first, or sign the unfragmented mezzanine and re-fragment "
-            "the signed output. Segmented verification already works today."
+    is_segmented = isinstance(media_input, Segmented)
+
+    # Segmented inputs want an output directory. For non-segmented
+    # inputs, --in-place / --force are no-ops (single-file sign is
+    # always effectively in-place from the caller's perspective).
+    if is_segmented:
+        _validate_segmented_output(
+            Path(args.input),
+            Path(args.output),
+            in_place=args.in_place,
+            force=args.force,
         )
 
     step_start = time.perf_counter()
-    media = stardust.probe_media(args.input, config.paths)
+    if is_segmented:
+        # Probe via init+first-fragment piped together.
+        probe_bytes = stardust.read_segmented_init_plus_first_fragment(
+            str(media_input.init), str(media_input.fragments[0]),
+        )
+        media = stardust.probe_media(str(media_input.init), config.paths, stdin_bytes=probe_bytes)
+    else:
+        media = stardust.probe_media(args.input, config.paths)
     shape_name = type(media_input).__name__
     print(
         f"[cli] Media detected: {media.media_kind} {media.width}x{media.height} "
@@ -228,52 +295,143 @@ def cmd_sign(args: argparse.Namespace) -> int:
     )
     media_probe_s = time.perf_counter() - step_start
 
+    # ---- Watermark step -------------------------------------------------
     step_start = time.perf_counter()
-    if isinstance(media_input, SingleFileFragmented):
-        schedule = parse_fragment_schedule(Path(args.input))
-        stardust.embed_single_file_fragmented(
-            args.input,
-            args.output,
-            args.wm_payload_hex.lower(),
-            config,
-            fragment_schedule=schedule,
-            video_preset=args.video_preset,
-            video_crf=args.video_crf,
-        )
-    else:
-        stardust.embed(
-            args.input,
-            args.output,
-            args.wm_payload_hex.lower(),
-            config,
-            video_preset=args.video_preset,
-            video_crf=args.video_crf,
-        )
-    embed_s = time.perf_counter() - step_start
-    print(f"[cli] Watermark embed: {embed_s:.2f}s", flush=True)
+    import tempfile as _tempfile
+    watermarked_tmp_ctx = None
+    try:
+        if isinstance(media_input, SingleFileFragmented):
+            schedule = parse_fragment_schedule(Path(args.input))
+            stardust.embed_single_file_fragmented(
+                args.input,
+                args.output,
+                args.wm_payload_hex.lower(),
+                config,
+                fragment_schedule=schedule,
+                video_preset=args.video_preset,
+                video_crf=args.video_crf,
+            )
+            watermarked_input_for_signer = args.output
+        elif is_segmented:
+            # Watermark into a scratch directory under --output's parent
+            # so downstream moves stay on the same filesystem. The
+            # scratch dir is freed after the signer completes.
+            parent = Path(args.output).resolve().parent
+            parent.mkdir(parents=True, exist_ok=True)
+            watermarked_tmp_ctx = _tempfile.TemporaryDirectory(
+                prefix="stardustproof-wm-", dir=str(parent)
+            )
+            watermarked_dir = Path(watermarked_tmp_ctx.name)
+            stardust.embed_segmented(
+                str(media_input.init),
+                [str(p) for p in media_input.fragments],
+                str(watermarked_dir),
+                args.wm_payload_hex.lower(),
+                config,
+                video_preset=args.video_preset,
+                video_crf=args.video_crf,
+            )
+            # The signer will classify this directory itself; pass the
+            # watermarked dir as image_path.
+            watermarked_input_for_signer = str(watermarked_dir)
+        else:
+            stardust.embed(
+                args.input,
+                args.output,
+                args.wm_payload_hex.lower(),
+                config,
+                video_preset=args.video_preset,
+                video_crf=args.video_crf,
+            )
+            watermarked_input_for_signer = args.output
+        embed_s = time.perf_counter() - step_start
+        print(f"[cli] Watermark embed: {embed_s:.2f}s", flush=True)
 
-    keystore = KeystoreClient(base_url=args.keystore_url, api_key=args.keystore_api_key)
-    step_start = time.perf_counter()
-    # Single signer entry point handles both SingleFile and
-    # SingleFileFragmented via internal media-shape classification. No
-    # output_path override -- the signer embeds in-place at args.output,
-    # and the CLI writes the WM-ID-keyed sidecar separately below.
-    manifest_bytes = generate_and_embed_manifest_simple(
-        image_path=args.output,
-        wm_id_bytes=payload,
-        thumbnail=args.thumbnail,
-        claim_generator_info=[{"name": args.claim_generator_name, "version": args.claim_generator_version}],
-        keystore_url=args.keystore_url,
-        keystore_api_key=args.keystore_api_key,
-        keystore_client=keystore,
-        publisher_key_id=f"org:{args.org_uuid}",
-        publisher_sign_authorization_handler=_make_org_sign_handler(keystore, args.signing_access_token),
-    )
-    if manifest_bytes is None:
-        raise RuntimeError("Manifest generation failed")
-    manifest_sign_s = time.perf_counter() - step_start
-    print(f"[cli] Manifest sign/embed: {manifest_sign_s:.2f}s", flush=True)
+        # ---- C2PA sign step --------------------------------------------
+        keystore = KeystoreClient(base_url=args.keystore_url, api_key=args.keystore_api_key)
+        step_start = time.perf_counter()
+        if is_segmented:
+            # Segmented signer requires an explicit output_path. For
+            # --in-place we sign into a scratch dir and swap files over
+            # originals after success. Otherwise sign directly into
+            # --output.
+            if args.in_place:
+                signer_scratch_ctx = _tempfile.TemporaryDirectory(
+                    prefix="stardustproof-signed-",
+                    dir=str(Path(args.output).resolve().parent),
+                )
+                signer_output_dir = signer_scratch_ctx.name
+            else:
+                signer_scratch_ctx = None
+                signer_output_dir = args.output
+                Path(signer_output_dir).mkdir(parents=True, exist_ok=True)
 
+            try:
+                manifest_bytes = generate_and_embed_manifest_simple(
+                    image_path=watermarked_input_for_signer,
+                    output_path=signer_output_dir,
+                    wm_id_bytes=payload,
+                    thumbnail=args.thumbnail,
+                    claim_generator_info=[{"name": args.claim_generator_name, "version": args.claim_generator_version}],
+                    keystore_url=args.keystore_url,
+                    keystore_api_key=args.keystore_api_key,
+                    keystore_client=keystore,
+                    publisher_key_id=f"org:{args.org_uuid}",
+                    publisher_sign_authorization_handler=_make_org_sign_handler(keystore, args.signing_access_token),
+                )
+                if args.in_place:
+                    import shutil as _shutil
+                    import os as _os
+                    # Atomically replace each file in --input with its
+                    # signed counterpart. Also clean up any stale files
+                    # from --input that the sign did not produce.
+                    signed_names = set()
+                    for src in Path(signer_output_dir).iterdir():
+                        dst = Path(args.input) / src.name
+                        signed_names.add(src.name)
+                        _os.replace(str(src), str(dst))
+                    # Remove input-only leftovers that were NOT in the
+                    # signed output (e.g. old playlists).
+                    for p in Path(args.input).iterdir():
+                        if p.name in signed_names:
+                            continue
+                        if p.name.startswith("."):
+                            continue
+                        # Preserve non-BMFF sidecars unless --force was
+                        # also set (user may have playlists etc.).
+                        if args.force:
+                            try:
+                                p.unlink()
+                            except OSError:
+                                pass
+            finally:
+                if signer_scratch_ctx is not None:
+                    signer_scratch_ctx.cleanup()
+        else:
+            # Single signer entry point handles both SingleFile and
+            # SingleFileFragmented via internal media-shape classification.
+            # No output_path override -- the signer embeds in-place at
+            # args.output, and the CLI writes the sidecar separately.
+            manifest_bytes = generate_and_embed_manifest_simple(
+                image_path=args.output,
+                wm_id_bytes=payload,
+                thumbnail=args.thumbnail,
+                claim_generator_info=[{"name": args.claim_generator_name, "version": args.claim_generator_version}],
+                keystore_url=args.keystore_url,
+                keystore_api_key=args.keystore_api_key,
+                keystore_client=keystore,
+                publisher_key_id=f"org:{args.org_uuid}",
+                publisher_sign_authorization_handler=_make_org_sign_handler(keystore, args.signing_access_token),
+            )
+        if manifest_bytes is None:
+            raise RuntimeError("Manifest generation failed")
+        manifest_sign_s = time.perf_counter() - step_start
+        print(f"[cli] Manifest sign/embed: {manifest_sign_s:.2f}s", flush=True)
+    finally:
+        if watermarked_tmp_ctx is not None:
+            watermarked_tmp_ctx.cleanup()
+
+    # ---- Sidecar write -------------------------------------------------
     step_start = time.perf_counter()
     manifest_path = DirectoryManifestStore(Path(args.manifest_store)).write_manifest(
         wm_id_hex=args.wm_payload_hex.lower(),

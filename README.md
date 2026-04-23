@@ -133,11 +133,34 @@ stardustproof sign \
   --signing-access-token <token>
 ```
 
-Segmented fragmented-MP4 (separate init + per-segment files on disk) is
-**not** supported for `sign` in this release — `sign` refuses with a
-clear error. The recommended workflow for segmented delivery is: sign
-the unfragmented mezzanine first, then package the signed output for
-DASH/HLS.
+### Segmented fragmented-MP4
+
+`sign` also accepts a **segmented fragmented-MP4 directory**: a
+directory containing exactly one init segment (BMFF file with `moov`
+but no `moof`) plus one or more media fragments (BMFF files with
+`moof` but no `moov`). The shape is auto-detected structurally; no
+filename conventions are required.
+
+```bash
+stardustproof sign \
+  --input ./dash-input/ \
+  --output ./dash-signed/ \
+  --wm-payload-hex 001122334455 \
+  --wm-bit-profile 48 \
+  --manifest-store ./manifest-store \
+  --org-uuid <org-uuid> \
+  --keystore-url http://localhost:2001 \
+  --signing-access-token <token>
+```
+
+Output is a flat directory containing the watermarked, signed
+`init.m4s` + `seg-NNNN.m4s`. The detached manifest goes into the
+store as usual, keyed by the watermark id.
+
+| Flag | Purpose |
+|---|---|
+| `--in-place` | Atomically replace the input directory contents with the signed output. `--output` must equal `--input` (or be omitted, in which case it defaults to `--input`). Interrupted signs leave the input tree in a partially-replaced state; prefer a separate `--output` for production. |
+| `--force` | For Segmented inputs with a non-empty `--output` directory, overwrite existing files. |
 
 ### Notes
 
