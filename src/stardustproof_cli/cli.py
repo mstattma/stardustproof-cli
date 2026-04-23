@@ -344,7 +344,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
                 video_crf=args.video_crf,
             )
             # The signer will classify this directory itself; pass the
-            # watermarked dir as image_path.
+            # watermarked dir as input_path.
             watermarked_input_for_signer = str(watermarked_dir)
         else:
             stardust.embed(
@@ -391,7 +391,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
 
             try:
                 manifest_bytes = generate_and_embed_manifest_simple(
-                    image_path=watermarked_input_for_signer,
+                    input_path=watermarked_input_for_signer,
                     output_path=signer_output_dir,
                     wm_id_bytes=payload,
                     thumbnail=args.thumbnail,
@@ -437,7 +437,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
             # No output_path override -- the signer embeds in-place at
             # args.output, and the CLI writes the sidecar separately.
             manifest_bytes = generate_and_embed_manifest_simple(
-                image_path=args.output,
+                input_path=args.output,
                 wm_id_bytes=payload,
                 thumbnail=args.thumbnail,
                 title=effective_title,

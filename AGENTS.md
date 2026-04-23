@@ -54,7 +54,7 @@ both sign and verify dispatch on its three return types:
 1. **Watermark** — generate Stardust `.pp` payload, then decode →
    `sffwembedsafe` filter → encode in a single ffmpeg pass.
 2. **C2PA sign** — signer's
-   `generate_and_embed_manifest_simple(image_path, output_path,
+   `generate_and_embed_manifest_simple(input_path, output_path,
    wm_id_bytes, ...)` classifies the input, embeds a signed
    manifest in-place (or redirected via `output_path`), and returns
    the manifest bytes.
