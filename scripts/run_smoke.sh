@@ -42,6 +42,10 @@ export STARDUSTPROOF_TEST_KEYSTORE_URL
 export STARDUSTPROOF_TEST_BIN_DIR
 export STARDUSTPROOF_TEST_ORG_UUID
 export STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN
+# Propagate optional c2patool override when caller has one set.
+if [[ -n "${STARDUSTPROOF_C2PATOOL:-}" ]]; then
+    export STARDUSTPROOF_C2PATOOL
+fi
 
 echo "[smoke] Repo: $REPO_ROOT"
 echo "[smoke] Keystore URL: $STARDUSTPROOF_TEST_KEYSTORE_URL"

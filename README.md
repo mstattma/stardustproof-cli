@@ -133,8 +133,16 @@ No reference YUV or metadata sidecars are produced.
 ## Integration Smoke Test
 
 The integration smoke test exercises the real keystore + signer path and
-asserts that the embedded watermark is blind-extractable from the signed
-output:
+asserts both that the embedded watermark is blind-extractable from the
+signed output, **and** that the detached manifest in the local store
+verifies against the watermarked content via `c2patool`. The verification
+step uses the bundled `c2patool` shipped inside the
+`stardustproof-c2pa-signer` package (built from the pinned
+`mstattma/c2pa-rs` fork) and trusts the Trusted Publisher CA from the
+signer repo's keystore submodule. It asserts that the active manifest
+contains a `c2pa.soft-binding` with `alg=castlabs.stardust` whose value
+equals the embedded watermark id, and that c2patool reports zero
+validation failures:
 
 ```bash
 export STARDUSTPROOF_TEST_KEYSTORE_URL=http://localhost:2001
