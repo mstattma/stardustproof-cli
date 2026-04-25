@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from stardustproof_cli import config as config_mod
 from stardustproof_cli.config import StardustPaths
 
 
@@ -29,3 +30,26 @@ def test_stardust_paths_check_binaries_reports_missing(tmp_path: Path):
     assert "extract" in names
     assert "ffmpeg" in names
     assert "ffprobe" in names
+
+
+def test_default_assets_root_prefers_packaged_bundle(tmp_path: Path, monkeypatch):
+    packaged_root = tmp_path / "_bundled"
+    (packaged_root / "bin").mkdir(parents=True)
+    source_root = tmp_path / "source-root"
+    source_root.mkdir()
+
+    monkeypatch.setattr(config_mod, "_packaged_assets_root", lambda: packaged_root)
+    monkeypatch.setattr(config_mod, "_source_root", lambda: source_root)
+
+    assert config_mod._default_assets_root() == packaged_root
+
+
+def test_default_assets_root_falls_back_to_source_root(tmp_path: Path, monkeypatch):
+    packaged_root = tmp_path / "missing-bundle"
+    source_root = tmp_path / "source-root"
+    source_root.mkdir()
+
+    monkeypatch.setattr(config_mod, "_packaged_assets_root", lambda: packaged_root)
+    monkeypatch.setattr(config_mod, "_source_root", lambda: source_root)
+
+    assert config_mod._default_assets_root() == source_root

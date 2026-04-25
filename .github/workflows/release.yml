@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      package_version: ${{ steps.metadata.outputs.package_version }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      artifact_zip: ${{ steps.metadata.outputs.artifact_zip }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read package version and validate tag
+        id: metadata
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path('pyproject.toml').read_text())
+          print(data['project']['version'])
+          PY
+          )
+          ARTIFACT_NAME="stardustproof-wheelhouse-linux-x86_64-${PACKAGE_VERSION}"
+          ARTIFACT_ZIP="dist/release/${ARTIFACT_NAME}.zip"
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            EXPECTED_TAG="v${PACKAGE_VERSION}"
+            if [[ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]]; then
+              echo "Tag/version mismatch: pyproject.toml has ${PACKAGE_VERSION}, but workflow ran for tag ${GITHUB_REF_NAME}. Expected ${EXPECTED_TAG}." >&2
+              exit 1
+            fi
+          fi
+
+          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "artifact_zip=${ARTIFACT_ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      - name: Build release artifact
+        run: python scripts/build_release.py --artifact-version "${{ steps.metadata.outputs.package_version }}"
+
+      - name: Verify expected release files exist
+        run: |
+          test -f "${{ steps.metadata.outputs.artifact_zip }}"
+          test -f dist/release/SHA256SUMS
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: |
+            ${{ steps.metadata.outputs.artifact_zip }}
+            dist/release/SHA256SUMS
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.metadata.outputs.package_version }}
+          files: |
+            ${{ steps.metadata.outputs.artifact_zip }}
+            dist/release/SHA256SUMS
+
+  optional-smoke:
+    needs: build-release
+    if: ${{ secrets.STARDUSTPROOF_TEST_ORG_UUID != '' && secrets.STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download built release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-release.outputs.artifact_name }}
+          path: dist/release
+
+      - name: Unpack and install release artifact
+        run: |
+          unzip -q dist/release/*.zip -d dist/release/unpacked
+          RELEASE_ROOT=$(find dist/release/unpacked -maxdepth 1 -type d -name 'stardustproof-wheelhouse-*' | head -n 1)
+          chmod +x "$RELEASE_ROOT/install.sh"
+          "$RELEASE_ROOT/install.sh" --python python
+          echo "RELEASE_ROOT=$RELEASE_ROOT" >> "$GITHUB_ENV"
+
+      - name: Clone pinned keystore sibling checkout
+        run: |
+          KEYSOURCE_URL=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('release/sources.lock.json').read_text())
+          print(data['sources']['stardustproof-keystore']['repo_url'])
+          PY
+          )
+          KEYSOURCE_SHA=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('release/sources.lock.json').read_text())
+          print(data['sources']['stardustproof-keystore']['commit'])
+          PY
+          )
+          git clone "$KEYSOURCE_URL" ../stardustproof-keystore
+          git -C ../stardustproof-keystore checkout "$KEYSOURCE_SHA"
+
+      - name: Start dev keystore
+        env:
+          KEYSTORE_DEV_SIGNING_ACCESS_TOKEN: ${{ secrets.STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN }}
+        run: scripts/start-dev-keystore.sh
+
+      - name: Run smoke tests
+        env:
+          STARDUSTPROOF_TEST_KEYSTORE_URL: http://127.0.0.1:2001
+          STARDUSTPROOF_TEST_ORG_UUID: ${{ secrets.STARDUSTPROOF_TEST_ORG_UUID }}
+          STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN: ${{ secrets.STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN }}
+        run: |
+          CLI="$RELEASE_ROOT/.venv/bin/stardustproof"
+          WORK_DIR="$RUNNER_TEMP/stardustproof-smoke"
+          mkdir -p "$WORK_DIR"
+          cp tests/fixtures/sample-photo.jpg "$WORK_DIR/input.jpg"
+          "$CLI" sign \
+            --input "$WORK_DIR/input.jpg" \
+            --output "$WORK_DIR/output.jpg" \
+            --wm-payload-hex 001122334455 \
+            --wm-bit-profile 48 \
+            --manifest-store "$WORK_DIR/manifest-store" \
+            --org-uuid "$STARDUSTPROOF_TEST_ORG_UUID" \
+            --keystore-url "$STARDUSTPROOF_TEST_KEYSTORE_URL" \
+            --signing-access-token "$STARDUSTPROOF_TEST_SIGNING_ACCESS_TOKEN"
+          "$CLI" verify \
+            --input "$WORK_DIR/output.jpg" \
+            --manifest-store "$WORK_DIR/manifest-store"

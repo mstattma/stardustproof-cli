@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "build",
     "pytest",
 ]
 
@@ -27,6 +28,12 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stardustproof_cli"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"bin" = "stardustproof_cli/_bundled/bin"
+"stardust_defaults.json" = "stardustproof_cli/_bundled/stardust_defaults.json"
+"src/stardustproof_cli/certs/castlabs_c2pa_ca.cert.pem" = "stardustproof_cli/certs/castlabs_c2pa_ca.cert.pem"
+"src/stardustproof_cli/certs/trusted_publisher_ca.cert.pem" = "stardustproof_cli/certs/trusted_publisher_ca.cert.pem"
 
 [tool.pytest.ini_options]
 markers = [

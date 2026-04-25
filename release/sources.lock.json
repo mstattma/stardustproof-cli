@@ -1,0 +1,19 @@
+{
+  "sources": {
+    "stardustproof-c2pa-signer": {
+      "repo_url": "https://github.com/mstattma/stardustproof-c2pa-signer-vibe.git",
+      "commit": "7a1c615ca37801fd65cea3e7a328c976b970ffdd",
+      "sibling_path": "../stardustproof-c2pa-signer-vibe"
+    },
+    "c2pa-python": {
+      "repo_url": "https://github.com/mstattma/c2pa-python.git",
+      "commit": "c3e3e5764b3e41c67d15bd799d4f5625a99e28b9",
+      "sibling_path": "../c2pa-python"
+    },
+    "stardustproof-keystore": {
+      "repo_url": "https://github.com/mstattma/stardustproof-keystore.git",
+      "commit": "a9d16e4233a23f9fa4cd781ee8d79984f0936959",
+      "sibling_path": "../stardustproof-keystore"
+    }
+  }
+}

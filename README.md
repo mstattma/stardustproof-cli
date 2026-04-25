@@ -42,6 +42,39 @@ box; use `scripts/build_patched_ffmpeg.sh` to rebuild for your target.
 
 ## Installation
 
+### Release bundle (recommended)
+
+Build the Linux `x86_64` release artifact locally:
+
+```bash
+python3 -m pip install --upgrade pip build
+python3 scripts/build_release.py
+```
+
+This produces:
+
+- `dist/release/stardustproof-wheelhouse-linux-x86_64-<version>.zip`
+- `dist/release/SHA256SUMS`
+
+The zip contains an offline `wheelhouse/`, `install.sh`, and a release
+manifest. On a target Linux `x86_64` machine:
+
+```bash
+unzip stardustproof-wheelhouse-linux-x86_64-<version>.zip
+cd stardustproof-wheelhouse-linux-x86_64-<version>
+chmod +x install.sh
+./install.sh
+./.venv/bin/stardustproof --help
+```
+
+`install.sh --current-env` installs into the current Python environment
+instead of creating `./.venv`.
+
+The release bundle is designed to work for keystore-less `verify`
+operation out of the box. `sign` still requires a reachable keystore.
+
+### Development install
+
 ```bash
 pip install -e ".[dev]"
 ```
@@ -77,6 +110,41 @@ sudo apt-get install -y build-essential nasm yasm pkg-config \
 The script builds a static `libsffwembedsafe.a` from the Stardust SAFE
 objects, fetches FFmpeg upstream sources, applies the filter patches, and
 produces `bin/ffmpeg/bin/ffmpeg` and `bin/ffmpeg/bin/ffprobe`.
+
+## Release Build
+
+The repository now includes a release builder and GitHub Actions workflow
+for a shippable Linux `x86_64` bundle.
+
+Local build:
+
+```bash
+python3 scripts/build_release.py
+```
+
+What the builder does:
+
+1. builds wheels for this CLI plus pinned `stardustproof-c2pa-signer`,
+   `c2pa-python`, and `stardustproof-keystore` source commits from
+   `release/sources.lock.json`,
+2. downloads/builds all remaining runtime wheels into an offline
+   `wheelhouse/`,
+3. packages the result into a release zip with `install.sh`, and
+4. validates the zip by installing it into a fresh virtualenv and
+   checking bundled binaries and trust anchors.
+
+GitHub Actions:
+
+- `.github/workflows/release.yml` runs on `workflow_dispatch` and on `v*`
+  tags.
+- The workflow uploads the release zip and `SHA256SUMS` as workflow
+  artifacts.
+- On version tags it also attaches those files to the GitHub Release.
+- When smoke-test secrets are present, it additionally signs and verifies
+  a sample asset using the built release artifact against a dev keystore.
+
+TODO: publish the raw wheelhouse wheels as separate release assets in
+addition to the zip bundle and checksums.
 
 ## Usage
 

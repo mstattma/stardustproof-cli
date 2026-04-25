@@ -6,12 +6,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def _repo_root() -> Path:
+_PACKAGE_ROOT = Path(__file__).resolve().parent
+
+
+def _source_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _packaged_assets_root() -> Path:
+    return _PACKAGE_ROOT / "_bundled"
+
+
+def _default_assets_root() -> Path:
+    packaged_root = _packaged_assets_root()
+    if (packaged_root / "bin").is_dir():
+        return packaged_root
+    return _source_root()
+
+
 def _load_stardust_defaults() -> dict:
-    defaults_path = _repo_root() / "stardust_defaults.json"
+    defaults_path = _default_assets_root() / "stardust_defaults.json"
     if defaults_path.exists():
         return json.loads(defaults_path.read_text())
     return {}
@@ -31,7 +45,7 @@ class StardustPaths:
                              the ``sffwembedsafe`` filter
     """
 
-    repo_root: Path = field(default_factory=_repo_root)
+    repo_root: Path = field(default_factory=_default_assets_root)
     custom_bin_dir: Path | None = None
 
     @property
