@@ -291,9 +291,46 @@ signature math are still validated).
 | 4 | `c2patool` invocation failed (non-zero exit or unparseable JSON) |
 | 5 | Soft-binding value does not match extracted WM id |
 | 6 | `c2patool` reported one or more validation failures |
+| 7 | ICA Human Identity Binding check failed (user-flow only) |
 
 Add `--json` to emit a single-line JSON object on stdout instead of the
 human-readable report (useful for CI scripts).
+
+### Trust tiers and the ICA Human Identity Binding (user-flow only)
+
+When a manifest carries an ICA-issued
+`cawg.identity_claims_aggregation` assertion alongside the
+publisher's `cawg.x509.cose` assertion (the user publisher flow),
+`verify` runs an additional cryptographic check that proves the
+publisher's CAWG private key signs over the ICA VC's content (CAWG
+nested-identity-assertion pattern, §1.4 Example 3 / §5.1.1) AND
+that the publisher's leaf-cert SPKI matches both the VC's
+`stardustproof:activeDidAssertionMethodKey` shortcut field and the
+user DID document's `assertionMethod` keys (RFC 7638 JWK
+thumbprints). Implementation:
+[`stardustproof_c2pa_signer.ica_binding`](https://github.com/mstattma/stardustproof-c2pa-signer-vibe).
+
+Outcome surfaces as a `trust_tier` field in the result:
+
+| Tier | Meaning |
+|---|---|
+| `publisher_and_human` | All checks pass; the publisher key is cryptographically tied to the ICA-attested human identities. |
+| `publisher_only` | Either the manifest has no ICA assertion (org publisher / Simple Sign) — nothing to enforce — OR the binding check failed and `--tolerate-ica-binding` was set. |
+| `untrusted` | One or more c2patool validation failures (or an earlier pipeline error). |
+
+By default, a binding failure on a user-flow manifest exits **7**
+(strict default — distinguishes a manifest that claims human
+identity but cannot prove it from one that pass the lower-tier
+checks cleanly). Pass `--tolerate-ica-binding` to downgrade the
+failure to `trust_tier=publisher_only` with exit 0; useful when:
+
+- Verifying user-flow assets that predate the binding rollout (no
+  longer relevant for new captures).
+- Scripted pipelines that consume `trust_tier` directly and want
+  to make their own verdict-tier decisions.
+
+Org-publisher / Simple Sign manifests have no ICA assertion at all
+and exit 0 regardless of this flag.
 
 ## Test fixtures
 

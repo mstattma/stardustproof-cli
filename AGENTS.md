@@ -78,9 +78,29 @@ both sign and verify dispatch on its three return types:
 5. Assert soft-binding `alg == castlabs.stardust` value matches
    the extracted watermark id; assert validation failure list is
    empty; report validation_state.
+6. **(user-flow only)** Run the ICA Human Identity Binding check
+   from `stardustproof_c2pa_signer.ica_binding`. Reads the
+   detached manifest bytes, extracts the publisher leaf cert via
+   `extract_publisher_identity_leaf_cert_der_from_manifest_bytes`,
+   maps c2patool's `cawg.ica.credential_valid` success entry to
+   row 4's `ica_signature_valid` boolean, and runs the 7-row
+   check. Outcome populates `VerifyResult.ica_binding` and
+   `VerifyResult.trust_tier`. When the manifest has no ICA
+   assertion (org publisher / Simple Sign), this step skips
+   cleanly and `trust_tier` becomes `"publisher_only"` — exit 0.
 
 Exit codes: 0 ok, 1 arg/IO, 2 no watermark, 3 manifest missing,
-4 c2patool error, 5 soft-binding mismatch, 6 validation failures.
+4 c2patool error, 5 soft-binding mismatch, 6 validation failures,
+**7 ICA Human Identity Binding failure** (user-flow manifests with
+an ICA assertion that fail one of the 7 binding sub-rows; pass
+`--tolerate-ica-binding` to downgrade to exit 0 with
+`trust_tier=publisher_only`).
+
+Trust tiers (`VerifyResult.trust_tier`): `publisher_and_human` (full
+binding holds), `publisher_only` (no ICA assertion present OR
+binding failed with `--tolerate-ica-binding`), `untrusted` (one
+or more c2patool failures). Always populated on any successful
+c2patool run, regardless of the exit code policy.
 
 ## Integration smoke test
 
@@ -207,3 +227,4 @@ section for the full timings table and the knobs.
 | Bundled ffmpeg feature profile | `scripts/build_patched_ffmpeg.sh`, `bin/ffmpeg/VERSION.md`, this file |
 | Manifest store layout | `manifest_store.py`, `README.md` |
 | Exit-code contract | `verify.py`, `README.md` |
+| ICA Human Identity Binding integration | `verify.py` (`_run_ica_binding_check`, `VerifyResult.ica_binding`, `VerifyResult.trust_tier`), `cli.py` (`--tolerate-ica-binding`), `README.md` "Trust tiers" section, `tests/test_verify.py`, `stardustproof_c2pa_signer.ica_binding` |

@@ -502,3 +502,100 @@ def test_verify_asset_single_file_fragmented_dispatch(monkeypatch, stub_config, 
     call = verify_calls[0]
     assert Path(call["asset_path"]).name == "frag.mp4"
     assert call.get("fragments_glob") is None
+
+
+# ---- ICA Human Identity Binding integration ------------------------------
+
+
+def test_verify_asset_no_ica_assertion_yields_publisher_only_tier(
+    monkeypatch, stub_config, asset_and_store,
+):
+    """Org-publisher / Simple Sign manifests have no ICA assertion.
+    The binding check must skip cleanly and set
+    trust_tier='publisher_only' with exit 0 -- no enforcement, no
+    failure surface, ica_binding stays None."""
+    asset, store = asset_and_store
+    # b"fake" has no parseable JUMBF; the binding extractor short-
+    # circuits to "ica_assertion_missing" which our wrapper maps to
+    # the no-assertion (skipped) outcome.
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+    monkeypatch.setattr(stardust, "extract_blind", lambda *a, **kw: SMOKE_WM_HEX)
+    _install_fake_verify(monkeypatch, report=_good_report(SMOKE_WM_HEX))
+
+    result = verify_mod.verify_asset(
+        input_path=asset, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    assert result.ok is True
+    assert result.exit_code == 0
+    assert result.trust_tier == "publisher_only"
+    assert result.ica_binding is None
+    # Soft-binding + validation surface still populated.
+    assert result.soft_binding["data"]["value"] == SMOKE_WM_HEX
+    assert result.validation_state == "Trusted"
+
+
+def test_verify_asset_trust_tier_field_in_json_output(
+    monkeypatch, stub_config, asset_and_store,
+):
+    """trust_tier and ica_binding must round-trip through to_json_dict
+    for machine consumers."""
+    asset, store = asset_and_store
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+    monkeypatch.setattr(stardust, "extract_blind", lambda *a, **kw: SMOKE_WM_HEX)
+    _install_fake_verify(monkeypatch, report=_good_report(SMOKE_WM_HEX))
+
+    result = verify_mod.verify_asset(
+        input_path=asset, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    blob = result.to_json_dict()
+    assert "trust_tier" in blob
+    assert blob["trust_tier"] == "publisher_only"
+    assert "ica_binding" in blob
+    assert blob["ica_binding"] is None
+
+
+def test_verify_asset_validation_failure_sets_untrusted_tier(
+    monkeypatch, stub_config, asset_and_store,
+):
+    """When c2patool reports validation failures (exit 6), the trust
+    tier must be 'untrusted' -- a downgraded tier label
+    (publisher_only) would mislead the caller into thinking the
+    publisher cert was vetted."""
+    asset, store = asset_and_store
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+    monkeypatch.setattr(stardust, "extract_blind", lambda *a, **kw: SMOKE_WM_HEX)
+    bad_report = _good_report(SMOKE_WM_HEX)
+    bad_report["validation_results"]["activeManifest"]["failure"] = [
+        {"code": "claimSignature.mismatch", "explanation": "stub failure"}
+    ]
+    _install_fake_verify(monkeypatch, report=bad_report)
+
+    result = verify_mod.verify_asset(
+        input_path=asset, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    assert result.ok is False
+    assert result.exit_code == 6
+    assert result.trust_tier == "untrusted"
+
+
+def test_render_human_includes_skipped_binding_for_org_flow(
+    monkeypatch, stub_config, asset_and_store,
+):
+    """The human-readable output should explicitly say 'SKIPPED' for
+    manifests with no ICA assertion so operators understand WHY no
+    7-row breakdown is shown."""
+    asset, store = asset_and_store
+    (store / f"{SMOKE_WM_HEX}.c2pa").write_bytes(b"fake")
+    monkeypatch.setattr(stardust, "extract_blind", lambda *a, **kw: SMOKE_WM_HEX)
+    _install_fake_verify(monkeypatch, report=_good_report(SMOKE_WM_HEX))
+
+    result = verify_mod.verify_asset(
+        input_path=asset, manifest_store=store,
+        config=stub_config, wm_bit_profile=48, check_trust=False,
+    )
+    rendered = verify_mod.render_human(result, input_path=asset)
+    assert "ICA Human Identity Binding: SKIPPED" in rendered
+    assert "trust_tier: publisher_only" in rendered

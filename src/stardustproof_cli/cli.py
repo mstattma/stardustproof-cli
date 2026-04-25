@@ -137,6 +137,19 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     verify.add_argument(
+        "--tolerate-ica-binding",
+        action="store_true",
+        help=(
+            "Downgrade ICA Human Identity Binding failures to "
+            "trust_tier=publisher_only with exit 0 instead of the "
+            "default exit 7. Useful when verifying user-flow assets "
+            "that predate the binding rollout, or in scripted "
+            "pipelines that want to consume trust_tier directly. "
+            "Org-publisher / Simple Sign manifests (no ICA assertion) "
+            "exit 0 regardless of this flag."
+        ),
+    )
+    verify.add_argument(
         "--bin-dir",
         help="Directory containing bundled Stardust + ffmpeg binaries",
     )
@@ -498,6 +511,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         trust_anchors=trust_anchors,
         cawg_trust_anchors=cawg_trust_anchors,
         check_trust=not args.no_trust,
+        tolerate_ica_binding=getattr(args, "tolerate_ica_binding", False),
     )
 
     if args.json_output:
